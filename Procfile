@@ -1,1 +1,0 @@
-worker: python telegram_designer_hybrid_bot
