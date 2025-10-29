@@ -56,9 +56,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    KeyboardButton,
 )
 
 # ===========================
@@ -324,59 +321,98 @@ CATEGORY_ICONS = {
 }
 
 
-def _mark(active: bool) -> str:
-    return "✅" if active else "▫️"
+def _inline_back_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu:main")
 
 
-def _timer_button_text(value: int, current: int) -> str:
-    label = "Off" if value == 0 else f"{value}s"
-    return f"{_mark(current == value)} ⏱️ Таймер · {label}"
+def _mark_selected(is_selected: bool) -> str:
+    return "✅" if is_selected else "▫️"
 
 
-def _points_button_text(enabled: bool) -> str:
-    state = "Вкл" if enabled else "Выкл"
-    return f"{_mark(enabled)} 🏅 Очки · {state}"
+def _timer_option_text(value: int, current: int) -> str:
+    label = "Выключен" if value == 0 else f"{value} сек."
+    return f"{_mark_selected(current == value)} ⏱️ {label}"
 
 
-def _penalty_button_text(enabled: bool) -> str:
-    state = "-1" if enabled else "0"
-    return f"{_mark(enabled)} ⚠️ Штраф · {state}"
+def _age_option_text(value: str, current: Set[str]) -> str:
+    return f"{_mark_selected(value in current)} 👶 {value}"
 
 
-def _age_button_text(level: str, selected: Set[str]) -> str:
-    return f"{_mark(level in selected)} 👶 Возраст · {level}"
+def _category_option_text(value: str, current: Set[str]) -> str:
+    icon = CATEGORY_ICONS.get(value, "🗂️")
+    return f"{_mark_selected(value in current)} {icon} {value}"
 
 
-def _category_button_text(name: str, selected: Set[str]) -> str:
-    icon = CATEGORY_ICONS.get(name, "🗂️")
-    return f"{_mark(name in selected)} {icon} Категория · {name}"
-
-
-def settings_keyboard(game: ChatGame) -> ReplyKeyboardMarkup:
-    timers = [0, 20, 30, 45]
-    timer_row = [KeyboardButton(text=_timer_button_text(t, game.settings["timer"])) for t in timers]
-
-    score_row = [
-        KeyboardButton(text=_points_button_text(game.settings["points"])),
-        KeyboardButton(text=_penalty_button_text(game.settings["skip_penalty"] == -1)),
+def _other_options(game: ChatGame) -> List[InlineKeyboardButton]:
+    points_text = f"{_mark_selected(game.settings['points'])} 🏅 Очки"
+    penalty_on = game.settings["skip_penalty"] == -1
+    penalty_text = f"{_mark_selected(penalty_on)} ⚠️ Штраф -1"
+    return [
+        InlineKeyboardButton(text=points_text, callback_data="settings:toggle:points"),
+        InlineKeyboardButton(text=penalty_text, callback_data="settings:toggle:penalty"),
     ]
 
-    age_row = [KeyboardButton(text=_age_button_text(a, game.settings["age"])) for a in AGE_LEVELS]
 
-    category_rows: List[List[KeyboardButton]] = []
-    cats = list(CATEGORIES)
-    for i in range(0, len(cats), 2):
-        row = [KeyboardButton(text=_category_button_text(c, game.settings["categories"])) for c in cats[i:i + 2]]
-        category_rows.append(row)
+def settings_keyboard(game: ChatGame, menu: str = "main") -> InlineKeyboardMarkup:
+    if menu == "timer":
+        timers = [0, 20, 30, 45]
+        rows: List[List[InlineKeyboardButton]] = []
+        current = game.settings["timer"]
+        for i in range(0, len(timers), 2):
+            chunk = [
+                InlineKeyboardButton(
+                    text=_timer_option_text(val, current),
+                    callback_data=f"settings:set:timer:{val}",
+                )
+                for val in timers[i : i + 2]
+            ]
+            rows.append(chunk)
+        rows.append([_inline_back_button()])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    control_row = [KeyboardButton(text="⬅️ Закрыть настройки")]
+    if menu == "age":
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=_age_option_text(age, game.settings["age"]),
+                    callback_data=f"settings:set:age:{age}",
+                )
+                for age in AGE_LEVELS
+            ]
+        ]
+        rows.append([_inline_back_button()])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    return ReplyKeyboardMarkup(
-        keyboard=[timer_row, score_row, age_row, *category_rows, control_row],
-        resize_keyboard=True,
-        input_field_placeholder="Настройки игры",
-        one_time_keyboard=False,
-    )
+    if menu == "category":
+        rows: List[List[InlineKeyboardButton]] = []
+        cats = list(CATEGORIES)
+        for i in range(0, len(cats), 2):
+            chunk = [
+                InlineKeyboardButton(
+                    text=_category_option_text(cat, game.settings["categories"]),
+                    callback_data=f"settings:set:category:{cat}",
+                )
+                for cat in cats[i : i + 2]
+            ]
+            rows.append(chunk)
+        rows.append([_inline_back_button()])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if menu == "other":
+        rows = [[btn] for btn in _other_options(game)]
+        rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")])
+        rows.append([_inline_back_button()])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # main
+    rows = [
+        [InlineKeyboardButton(text="⏱️ Время", callback_data="settings:menu:timer"),
+         InlineKeyboardButton(text="👶 Возраст", callback_data="settings:menu:age")],
+        [InlineKeyboardButton(text="🗂️ Категории", callback_data="settings:menu:category")],
+        [InlineKeyboardButton(text="⚙️ Другое", callback_data="settings:menu:other")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _settings_summary(game: ChatGame) -> str:
@@ -395,86 +431,49 @@ def _settings_summary(game: ChatGame) -> str:
     )
 
 
-async def delete_message_safely(message: Message):
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-    except Exception:
-        pass
-
-
-async def update_settings_panel(chat_id: int, game: ChatGame, info: Optional[str] = None):
-    if game.settings_message_id:
-        try:
-            await bot.delete_message(chat_id, game.settings_message_id)
-        except TelegramBadRequest:
-            pass
-        game.settings_message_id = None
-
+async def update_settings_panel(
+    chat_id: int,
+    game: ChatGame,
+    menu: str = "main",
+    info: Optional[str] = None,
+):
     text = _settings_summary(game)
     if info:
         text = f"{info}\n\n{text}"
 
-    sent = await bot.send_message(chat_id, text, reply_markup=settings_keyboard(game))
+    markup = settings_keyboard(game, menu)
+
+    if game.settings_message_id:
+        try:
+            await bot.edit_message_text(
+                text=text,
+                chat_id=chat_id,
+                message_id=game.settings_message_id,
+                reply_markup=markup,
+            )
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+            try:
+                await bot.delete_message(chat_id, game.settings_message_id)
+            except TelegramBadRequest:
+                pass
+
+    sent = await bot.send_message(chat_id, text, reply_markup=markup)
     game.settings_message_id = sent.message_id
 
 
 async def close_settings_panel(chat_id: int, game: Optional[ChatGame], info: Optional[str] = None):
-    removed = False
     if game and game.settings_message_id:
         try:
             await bot.delete_message(chat_id, game.settings_message_id)
         except TelegramBadRequest:
             pass
         game.settings_message_id = None
-        removed = True
 
-    if info is None and not removed:
-        return
-
-    message_text = info if info is not None else "⌨️ Клавиатура настроек скрыта."
-    await bot.send_message(chat_id, message_text, reply_markup=ReplyKeyboardRemove())
-
-
-def _suffix(text: str) -> Optional[str]:
-    if "·" not in text:
-        return None
-    return text.split("·", 1)[1].strip()
-
-
-def _match_timer_value(text: str) -> Optional[int]:
-    if "⏱️ Таймер" not in text:
-        return None
-    suffix = _suffix(text)
-    if not suffix:
-        return None
-    if suffix == "Off":
-        return 0
-    if suffix.endswith("s"):
-        try:
-            return int(suffix[:-1])
-        except ValueError:
-            return None
-    return None
-
-
-def _match_age_value(text: str) -> Optional[str]:
-    if "👶 Возраст" not in text:
-        return None
-    suffix = _suffix(text)
-    if suffix in AGE_LEVELS:
-        return suffix
-    return None
-
-
-def _match_category_value(text: str) -> Optional[str]:
-    if "Категория" not in text:
-        return None
-    suffix = _suffix(text)
-    if suffix in CATEGORIES:
-        return suffix
-    return None
+    if info:
+        await bot.send_message(chat_id, info)
 
 
 def ensure_game(chat_id: int) -> Optional[ChatGame]:
@@ -604,7 +603,7 @@ async def cmd_end(m: Message):
         await m.answer("Только хост может завершить игру.")
         return
     await cancel_timer(game)
-    await close_settings_panel(chat_id, game, info="⌨️ Клавиатура настроек скрыта.")
+    await close_settings_panel(chat_id, game, info="⚙️ Панель настроек скрыта.")
     GAMES.pop(chat_id, None)
     await m.answer("🏁 Игра завершена. Спасибо за игру!")
 
@@ -858,7 +857,7 @@ async def cb_end(c: CallbackQuery):
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может завершить.", show_alert=True); return
     await cancel_timer(game)
-    await close_settings_panel(chat_id, game, info="⌨️ Клавиатура настроек скрыта.")
+    await close_settings_panel(chat_id, game, info="⚙️ Панель настроек скрыта.")
     GAMES.pop(chat_id, None)
     await c.message.answer("🏁 Игра завершена. Спасибо за игру!")
     await c.answer()
@@ -874,118 +873,138 @@ async def cb_settings(c: CallbackQuery):
     await c.answer()
 
 
-@dp.message(lambda m: isinstance(m.text, str) and _match_timer_value(m.text) is not None)
-async def msg_timer_setting(m: Message):
-    chat_id = m.chat.id
-    value = _match_timer_value(m.text or "")
-    if value is None:
-        return
-    game = ensure_game(chat_id)
-    if not game:
-        await delete_message_safely(m)
-        return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может менять настройки.")
-        await delete_message_safely(m)
-        return
+def _callback_game(c: CallbackQuery) -> Optional[ChatGame]:
+    message = c.message
+    if not message:
+        return None
+    return ensure_game(message.chat.id)
 
+
+async def _ensure_host(c: CallbackQuery, game: ChatGame) -> bool:
+    if not is_host(game, c.from_user.id):
+        await c.answer("Только хост может менять настройки.", show_alert=True)
+        return False
+    return True
+
+
+@dp.callback_query(F.data.startswith("settings:menu:"))
+async def cb_settings_menu(c: CallbackQuery):
+    game = _callback_game(c)
+    if not game:
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+    menu = c.data.split(":", 2)[2]
+    await update_settings_panel(c.message.chat.id, game, menu=menu)
+    await c.answer()
+
+
+@dp.callback_query(F.data == "settings:close")
+async def cb_settings_close(c: CallbackQuery):
+    game = _callback_game(c)
+    if not game:
+        await c.answer()
+        return
+    if not await _ensure_host(c, game):
+        return
+    await close_settings_panel(c.message.chat.id, game, info="⚙️ Панель настроек закрыта.")
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("settings:set:timer:"))
+async def cb_settings_timer(c: CallbackQuery):
+    game = _callback_game(c)
+    if not game:
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+    if not await _ensure_host(c, game):
+        return
+    try:
+        value = int(c.data.rsplit(":", 1)[1])
+    except ValueError:
+        await c.answer("Некорректное значение таймера.", show_alert=True)
+        return
     if game.settings["timer"] == value:
-        await update_settings_panel(chat_id, game, info="⏱️ Таймер уже установлен в это значение.")
-    else:
-        game.settings["timer"] = value
-        human = "выключен" if value == 0 else f"{value} сек."
-        await update_settings_panel(chat_id, game, info=f"⏱️ Таймер установлен на {human}.")
-    await delete_message_safely(m)
+        await c.answer("Таймер уже установлен.")
+        await update_settings_panel(c.message.chat.id, game, menu="timer")
+        return
+    game.settings["timer"] = value
+    human = "выключен" if value == 0 else f"{value} сек."
+    await update_settings_panel(
+        c.message.chat.id,
+        game,
+        menu="timer",
+    )
+    await c.answer(f"Таймер: {human}")
 
 
-@dp.message(lambda m: isinstance(m.text, str) and "🏅 Очки" in m.text)
-async def msg_points_setting(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
+@dp.callback_query(F.data.startswith("settings:set:age:"))
+async def cb_settings_age(c: CallbackQuery):
+    game = _callback_game(c)
     if not game:
-        await delete_message_safely(m)
+        await c.answer("Игра не найдена.", show_alert=True)
         return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может менять настройки.")
-        await delete_message_safely(m)
+    if not await _ensure_host(c, game):
         return
+    age = c.data.rsplit(":", 1)[1]
+    if age not in AGE_LEVELS:
+        await c.answer("Неизвестный возраст.", show_alert=True)
+        return
+    if game.settings["age"] == {age}:
+        await c.answer("Возраст уже выбран.")
+        await update_settings_panel(c.message.chat.id, game, menu="age")
+        return
+    game.settings["age"] = {age}
+    await update_settings_panel(c.message.chat.id, game, menu="age")
+    await c.answer(f"Возраст: {age}")
 
+
+@dp.callback_query(F.data.startswith("settings:set:category:"))
+async def cb_settings_category(c: CallbackQuery):
+    game = _callback_game(c)
+    if not game:
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+    if not await _ensure_host(c, game):
+        return
+    category = c.data.rsplit(":", 1)[1]
+    if category not in CATEGORIES:
+        await c.answer("Неизвестная категория.", show_alert=True)
+        return
+    if game.settings["categories"] == {category}:
+        await c.answer("Категория уже выбрана.")
+        await update_settings_panel(c.message.chat.id, game, menu="category")
+        return
+    game.settings["categories"] = {category}
+    await update_settings_panel(c.message.chat.id, game, menu="category")
+    await c.answer(f"Категория: {category}")
+
+
+@dp.callback_query(F.data == "settings:toggle:points")
+async def cb_settings_points(c: CallbackQuery):
+    game = _callback_game(c)
+    if not game:
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+    if not await _ensure_host(c, game):
+        return
     game.settings["points"] = not game.settings["points"]
     state = "включены" if game.settings["points"] else "выключены"
-    await update_settings_panel(chat_id, game, info=f"🏅 Очки {state}.")
-    await delete_message_safely(m)
+    await update_settings_panel(c.message.chat.id, game, menu="other")
+    await c.answer(f"Очки {state}")
 
 
-@dp.message(lambda m: isinstance(m.text, str) and "⚠️ Штраф" in m.text)
-async def msg_penalty_setting(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
+@dp.callback_query(F.data == "settings:toggle:penalty")
+async def cb_settings_penalty(c: CallbackQuery):
+    game = _callback_game(c)
     if not game:
-        await delete_message_safely(m)
+        await c.answer("Игра не найдена.", show_alert=True)
         return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может менять настройки.")
-        await delete_message_safely(m)
+    if not await _ensure_host(c, game):
         return
-
     game.settings["skip_penalty"] = -1 if game.settings["skip_penalty"] == 0 else 0
     state = "-1" if game.settings["skip_penalty"] == -1 else "0"
-    await update_settings_panel(chat_id, game, info=f"⚠️ Штраф теперь {state}.")
-    await delete_message_safely(m)
-
-
-@dp.message(lambda m: isinstance(m.text, str) and _match_age_value(m.text) is not None)
-async def msg_age_setting(m: Message):
-    chat_id = m.chat.id
-    age = _match_age_value(m.text or "")
-    if age is None:
-        return
-    game = ensure_game(chat_id)
-    if not game:
-        await delete_message_safely(m)
-        return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может менять настройки.")
-        await delete_message_safely(m)
-        return
-
-    if game.settings["age"] == {age}:
-        await update_settings_panel(chat_id, game, info="Возраст уже выбран.")
-    else:
-        game.settings["age"] = {age}
-        await update_settings_panel(chat_id, game, info=f"Возраст сменён на {age}.")
-    await delete_message_safely(m)
-
-
-@dp.message(lambda m: isinstance(m.text, str) and _match_category_value(m.text) is not None)
-async def msg_category_setting(m: Message):
-    chat_id = m.chat.id
-    category = _match_category_value(m.text or "")
-    if category is None:
-        return
-    game = ensure_game(chat_id)
-    if not game:
-        await delete_message_safely(m)
-        return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может менять настройки.")
-        await delete_message_safely(m)
-        return
-
-    if game.settings["categories"] == {category}:
-        await update_settings_panel(chat_id, game, info="Категория уже выбрана.")
-    else:
-        game.settings["categories"] = {category}
-        await update_settings_panel(chat_id, game, info=f"Категория сменена на {category}.")
-    await delete_message_safely(m)
-
-
-@dp.message(lambda m: isinstance(m.text, str) and m.text.strip() == "⬅️ Закрыть настройки")
-async def msg_close_settings(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    await close_settings_panel(chat_id, game, info="⚙️ Настройки закрыты.")
-    await delete_message_safely(m)
+    await update_settings_panel(c.message.chat.id, game, menu="other")
+    await c.answer(f"Штраф {state}")
 
 # ===========================
 # MAIN
