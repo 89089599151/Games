@@ -46,13 +46,12 @@ import asyncio
 import json
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 
 # ===========================
@@ -608,13 +607,12 @@ async def cb_pick_type(c: CallbackQuery):
     turn.card_id = card["id"]
 
     # Показ задания
-    for_host = is_host(game, c.from_user.id) or is_host(game, game.host_id)
     try:
         await c.message.edit_text(
             f"👉 <b>Ход:</b> {mention_html(turn.player_id, 'Игрок')}\n"
             f"{'🟦 Правда' if kind=='truth' else '🟥 Действие'}:\n"
             f"{card['text']}",
-            reply_markup=task_keyboard(game, for_host=is_host(game, game.host_id))
+            reply_markup=task_keyboard(game, for_host=is_host(game, c.from_user.id))
         )
     except Exception:
         pass
