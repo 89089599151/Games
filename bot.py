@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
+# Aiogram 3.7+ предоставляет DefaultBotProperties, но в 3.2 его нет,
+# поэтому импортируем с запасным вариантом для обратной совместимости.
+try:
+    from aiogram.client.default import DefaultBotProperties
+except ImportError:  # aiogram<=3.6
+    DefaultBotProperties = None  # type: ignore[assignment]
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -320,7 +325,13 @@ def ensure_host(callback: CallbackQuery, game: GameState) -> bool:
     return False
 
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+bot_defaults: Dict[str, object] = {}
+if DefaultBotProperties is not None:
+    bot_defaults["default"] = DefaultBotProperties(parse_mode="HTML")
+else:
+    bot_defaults["parse_mode"] = "HTML"
+
+bot = Bot(token=BOT_TOKEN, **bot_defaults)
 dp = Dispatcher()
 
 
