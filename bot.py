@@ -1,6 +1,7 @@
 """Truth or Dare offline host bot."""
 
 import asyncio
+import importlib
 import os
 import random
 from dataclasses import dataclass, field
@@ -325,13 +326,37 @@ def ensure_host(callback: CallbackQuery, game: GameState) -> bool:
     return False
 
 
-bot_defaults: Dict[str, object] = {}
-if DefaultBotProperties is not None:
-    bot_defaults["default"] = DefaultBotProperties(parse_mode="HTML")
-else:
-    bot_defaults["parse_mode"] = "HTML"
+def create_bot(token: str) -> Bot:
+    """Create a Bot instance that works across aiogram 3.2-3.7+ releases."""
 
-bot = Bot(token=BOT_TOKEN, **bot_defaults)
+    kwargs: Dict[str, object] = {}
+    if DefaultBotProperties is not None:
+        kwargs["default"] = DefaultBotProperties(parse_mode="HTML")
+    else:
+        kwargs["parse_mode"] = "HTML"
+
+    try:
+        return Bot(token=token, **kwargs)
+    except TypeError as exc:
+        message = str(exc).lower()
+        if "parse_mode" not in kwargs or "parse_mode" not in message:
+            raise
+
+        try:
+            module = importlib.import_module("aiogram.client.default")
+        except ImportError as import_error:  # pragma: no cover - fallback should rarely fail
+            raise exc from import_error
+
+        default_class = getattr(module, "DefaultBotProperties", None)
+        if default_class is None:
+            raise
+
+        kwargs.pop("parse_mode", None)
+        kwargs["default"] = default_class(parse_mode="HTML")
+        return Bot(token=token, **kwargs)
+
+
+bot = create_bot(BOT_TOKEN)
 dp = Dispatcher()
 
 
