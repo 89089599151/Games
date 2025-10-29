@@ -210,8 +210,8 @@ class ChatGame:
         "timer": 30,            # сек., 0 отключить
         "points": True,         # начислять очки
         "skip_penalty": 0,      # -1 если нужен штраф
-        "age": set(AGE_LEVELS), # доступные уровни
-        "categories": set(CATEGORIES) # активные категории
+        "age": {AGE_LEVELS[0]}, # выбранный возраст
+        "categories": {CATEGORIES[0]} # выбранная категория
     })
     current_turn: Optional[Turn] = None
     timer_task: Optional[asyncio.Task] = None
@@ -366,17 +366,19 @@ async def cancel_timer(game: ChatGame):
 async def refresh_settings_markup(message: Message, game: ChatGame):
     try:
         await message.edit_reply_markup(reply_markup=settings_keyboard(game))
-    except TelegramBadRequest:
+    except TelegramBadRequest as err:
+        err_text = str(err).lower()
+        if "message is not modified" in err_text:
+            return
         try:
             await message.edit_text(
                 "⚙️ <b>Настройки</b> (только хост может менять):",
                 reply_markup=settings_keyboard(game)
             )
-        except TelegramBadRequest:
-            await message.answer(
-                "⚙️ <b>Настройки</b> (только хост может менять):",
-                reply_markup=settings_keyboard(game)
-            )
+        except TelegramBadRequest as err_text_edit:
+            if "message is not modified" in str(err_text_edit).lower():
+                return
+            return
 
 
 async def start_timer(game: ChatGame, seconds: int, on_expire):
@@ -805,12 +807,10 @@ async def cb_age(c: CallbackQuery):
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     a = c.data.split(":")[1]
-    if a in game.settings["age"]:
-        game.settings["age"].remove(a)
-    else:
-        game.settings["age"].add(a)
-    if not game.settings["age"]:  # минимум один уровень
-        game.settings["age"].add(a)
+    if game.settings["age"] == {a}:
+        await c.answer("Уже выбрано.")
+        return
+    game.settings["age"] = {a}
     await refresh_settings_markup(c.message, game)
     await c.answer("Готово.")
 
@@ -823,12 +823,10 @@ async def cb_cat(c: CallbackQuery):
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     cat = c.data.split(":")[1]
-    if cat in game.settings["categories"]:
-        game.settings["categories"].remove(cat)
-    else:
-        game.settings["categories"].add(cat)
-    if not game.settings["categories"]:
-        game.settings["categories"].add(cat)
+    if game.settings["categories"] == {cat}:
+        await c.answer("Уже выбрано.")
+        return
+    game.settings["categories"] = {cat}
     await refresh_settings_markup(c.message, game)
     await c.answer("Готово.")
 
