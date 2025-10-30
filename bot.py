@@ -57,8 +57,6 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
 )
 
 # ===========================
@@ -666,14 +664,19 @@ def settings_text(game: ChatGame, menu: str) -> str:
     return header
 
 
-def start_menu_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="/newgame"), KeyboardButton(text="/score")],
-            [KeyboardButton(text="/settings"), KeyboardButton(text="/help")],
-            [KeyboardButton(text="/end")],
-        ],
-        resize_keyboard=True,
+def start_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎮 Новая игра", callback_data="main:newgame"),
+                InlineKeyboardButton(text="📊 Счёт", callback_data="main:score"),
+            ],
+            [
+                InlineKeyboardButton(text="⚙️ Настройки", callback_data="main:settings"),
+                InlineKeyboardButton(text="ℹ️ Помощь", callback_data="main:help"),
+            ],
+            [InlineKeyboardButton(text="🏁 Завершить", callback_data="main:end")],
+        ]
     )
 
 
@@ -938,6 +941,87 @@ def next_index(game: ChatGame) -> int:
     game.current_idx = (game.current_idx + 1) % len(game.players)
     return game.current_idx
 
+
+async def start_new_game_session(chat_id: int, host_id: int, host_name: str):
+    existing = GAMES.get(chat_id)
+    if existing:
+        await end_game_session(existing, "🔁 Лобби перезапущено новым хостом.")
+
+    clear_pending_additions(chat_id)
+    game = ChatGame(chat_id=chat_id, host_id=host_id)
+    register_player(game, host_id, host_name)
+    GAMES[chat_id] = game
+
+    placeholder = await bot.send_message(
+        chat_id,
+        "🆕 Создаём лобби...",
+        reply_markup=lobby_keyboard(game),
+    )
+    await refresh_lobby(game, message=placeholder)
+
+
+async def send_scoreboard(chat_id: int):
+    game = ensure_game(chat_id)
+    if not game or not game.scores:
+        await bot.send_message(chat_id, "Пока нет очков.")
+        return
+    await bot.send_message(chat_id, "📊 <b>Текущий счёт</b>:\n" + format_scores(game))
+
+
+async def open_settings_interface(
+    chat_id: int, user_id: int, *, callback: Optional[CallbackQuery] = None
+):
+    game = ensure_game(chat_id)
+    if not game:
+        if callback:
+            await callback.answer("Игра не найдена. Сначала /newgame", show_alert=True)
+        else:
+            await bot.send_message(chat_id, "Игра не найдена. Сначала /newgame")
+        return
+    if not is_host(game, user_id):
+        if callback:
+            await callback.answer("Только хост может менять настройки.", show_alert=True)
+        else:
+            await bot.send_message(chat_id, "Только хост может менять настройки.")
+        return
+    if callback:
+        await callback.answer()
+    await show_settings_menu(game)
+
+
+async def finish_game_by_host(
+    chat_id: int, user_id: int, *, callback: Optional[CallbackQuery] = None
+):
+    game = ensure_game(chat_id)
+    if not game:
+        if callback:
+            await callback.answer("Игра не найдена.", show_alert=True)
+        else:
+            await bot.send_message(chat_id, "Игра не найдена.")
+        return
+    if not is_host(game, user_id):
+        if callback:
+            await callback.answer("Только хост может завершить игру.", show_alert=True)
+        else:
+            await bot.send_message(chat_id, "Только хост может завершить игру.")
+        return
+    if callback:
+        await callback.answer()
+    await end_game_session(game, "🏁 Игра завершена. Спасибо за игру!")
+
+
+async def send_help_text(chat_id: int):
+    await bot.send_message(
+        chat_id,
+        "ℹ️ <b>Правила и команды</b>\n\n"
+        "Создай лобби командой /newgame. Хост автоматически попадает в список игроков и может добавлять остальных вручную.\n"
+        "Нажми «Добавить игрока», введи имя участника и выбери пол — бот добавит его в список.\n\n"
+        "Когда готовы — хост жмёт «Старт». Каждый ход игрок выбирает <b>Правда</b> или <b>Действие</b>.\n"
+        "После выполнения хост отмечает результат кнопками «Выполнено» или «Пропуск».\n\n"
+        "Можно менять таймер, возраст и категорию через меню настроек (только у хоста).\n"
+        "Команда /score показывает счёт, /end завершает игру с итогами.",
+    )
+
 # ===========================
 # ХЕНДЛЕРЫ
 # ===========================
@@ -949,67 +1033,56 @@ async def on_start(m: Message):
         "Создай лобби командой /newgame — ты автоматически станешь хостом."
         " Добавляй участников кнопкой «Добавить игрока», указывая имя и пол.\n"
         "Когда все на месте — жми «Старт».\n\n"
-        "Выбирай нужную команду на клавиатуре ниже 👇",
+        "Выбирай нужную команду кнопками ниже 👇",
         reply_markup=start_menu_keyboard(),
     )
 
 @dp.message(Command("newgame"))
 async def cmd_newgame(m: Message):
-    chat_id = m.chat.id
-    user_id = m.from_user.id
+    await start_new_game_session(m.chat.id, m.from_user.id, m.from_user.full_name)
 
-    existing = GAMES.get(chat_id)
-    if existing:
-        await end_game_session(existing, "🔁 Лобби перезапущено новым хостом.")
 
-    clear_pending_additions(chat_id)
-    game = ChatGame(chat_id=chat_id, host_id=user_id)
-    register_player(game, user_id, m.from_user.full_name)
-    GAMES[chat_id] = game
-
-    placeholder = await m.answer("🆕 Создаём лобби...", reply_markup=lobby_keyboard(game))
-    await refresh_lobby(game, message=placeholder)
 @dp.message(Command("score"))
 async def cmd_score(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    if not game or not game.scores:
-        await m.answer("Пока нет очков.")
-        return
-    await m.answer("📊 <b>Текущий счёт</b>:\n" + format_scores(game))
+    await send_scoreboard(m.chat.id)
+
 
 @dp.message(Command("settings"))
 async def cmd_settings(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    if not game:
-        await m.answer("Игра не найдена. Сначала /newgame")
-        return
-    await show_settings_menu(game)
+    await open_settings_interface(m.chat.id, m.from_user.id)
+
 
 @dp.message(Command("end"))
 async def cmd_end(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    if not game:
-        await m.answer("Игра не найдена.")
-        return
-    if not is_host(game, m.from_user.id):
-        await m.answer("Только хост может завершить игру.")
-        return
-    await end_game_session(game, "🏁 Игра завершена. Спасибо за игру!")
+    await finish_game_by_host(m.chat.id, m.from_user.id)
 
 
 @dp.message(Command("help"))
 async def cmd_help(m: Message):
-    await m.answer(
-        "ℹ️ <b>Правила и команды</b>\n\n"
-        "Создай лобби командой /newgame. Хост автоматически попадает в список игроков и может добавлять остальных вручную.\n"
-        "Нажми «Добавить игрока», введи имя участника и выбери пол — бот добавит его в список.\n\n"
-        "Когда готовы — хост жмёт «Старт». Каждый ход игрок выбирает <b>Правда</b> или <b>Действие</b>.\n"
-        "После выполнения хост отмечает результат кнопками «Выполнено» или «Пропуск».\n\n"
-        "Команды: /score — счёт, /settings — настройки (доступно хосту), /end — завершить игру, /import_deck — добавить свои вопросы."
-    )
+    await send_help_text(m.chat.id)
+
+
+@dp.callback_query(F.data.startswith("main:"))
+async def on_main_menu_button(call: CallbackQuery):
+    action = call.data.split(":", 1)[1] if call.data else ""
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+
+    if action == "newgame":
+        await call.answer()
+        await start_new_game_session(chat_id, call.from_user.id, call.from_user.full_name)
+    elif action == "score":
+        await call.answer()
+        await send_scoreboard(chat_id)
+    elif action == "settings":
+        await open_settings_interface(chat_id, call.from_user.id, callback=call)
+    elif action == "help":
+        await call.answer()
+        await send_help_text(chat_id)
+    elif action == "end":
+        await finish_game_by_host(chat_id, call.from_user.id, callback=call)
+    else:
+        await call.answer()
+
 
 @dp.message(Command("import_deck"))
 async def cmd_import_deck(m: Message):
