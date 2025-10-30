@@ -45,6 +45,7 @@ from dotenv import load_dotenv
 load_dotenv()
 import asyncio
 import json
+import html
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -199,6 +200,14 @@ DEFAULT_CATEGORY_KEY = "Лёгкое"
 SELECTED_MARK = "✅"
 UNSELECTED_MARK = "▫️"
 
+GENDER_OPTIONS = {
+    "male": {"emoji": "👦", "title": "Мужской"},
+    "female": {"emoji": "👧", "title": "Женский"},
+    "other": {"emoji": "🧑", "title": "Другое"},
+}
+
+DEFAULT_GENDER_KEY = "other"
+
 # ===========================
 # ИГРОВЫЕ СТРУКТУРЫ
 # ===========================
@@ -207,6 +216,8 @@ UNSELECTED_MARK = "▫️"
 class Player:
     user_id: int
     name: str
+    gender: str = DEFAULT_GENDER_KEY
+    is_virtual: bool = False
 
 @dataclass
 class Turn:
@@ -246,6 +257,14 @@ class ChatGame:
     lobby_message_id: Optional[int] = None
     settings_message_id: Optional[int] = None
     rounds_played: int = 0
+    virtual_counter: int = 0
+
+
+@dataclass
+class PendingPlayerAddition:
+    chat_id: int
+    host_id: int
+    name: Optional[str] = None
 
     def current_player(self) -> Optional[Player]:
         if not self.players: return None
@@ -254,6 +273,14 @@ class ChatGame:
 
 # Все игры по чатам
 GAMES: Dict[int, ChatGame] = {}
+
+# Отложенные операции добавления игроков (chat_id, host_id) -> PendingPlayerAddition
+PENDING_PLAYER_ADDITIONS: Dict[Tuple[int, int], PendingPlayerAddition] = {}
+
+
+def clear_pending_additions(chat_id: int):
+    for key in [key for key in PENDING_PLAYER_ADDITIONS if key[0] == chat_id]:
+        PENDING_PLAYER_ADDITIONS.pop(key, None)
 
 # ===========================
 # AIROGRAM SETUP
@@ -273,8 +300,26 @@ dp = Dispatcher()
 # ===========================
 
 def mention_html(user_id: int, name: str) -> str:
-    safe = name.replace("<", "").replace(">", "")
+    safe = html.escape(name, quote=False)
     return f'<a href="tg://user?id={user_id}">{safe}</a>'
+
+
+def player_gender_icon(player: Player) -> str:
+    return GENDER_OPTIONS.get(player.gender, {}).get("emoji", "")
+
+
+def render_player_link(player: Player) -> str:
+    icon = player_gender_icon(player)
+    if player.is_virtual:
+        return f"{html.escape(player.name)}{(' ' + icon) if icon else ''}"
+    return f"{mention_html(player.user_id, player.name)}{(' ' + icon) if icon else ''}"
+
+
+def get_player_display(game: ChatGame, user_id: int) -> str:
+    player = get_player(game, user_id)
+    if player:
+        return render_player_link(player)
+    return mention_html(user_id, "Игрок")
 
 def is_host(game: ChatGame, user_id: int) -> bool:
     return game.host_id == user_id
@@ -286,7 +331,7 @@ def get_player(game: ChatGame, user_id: int) -> Optional[Player]:
 
 def format_player_name(game: ChatGame, player: Player) -> str:
     prefix = "👑" if player.user_id == game.host_id else "🎮"
-    return f"{prefix} {mention_html(player.user_id, player.name)}"
+    return f"{prefix} {render_player_link(player)}"
 
 
 def cleanup_scores(game: ChatGame):
@@ -305,9 +350,14 @@ def format_scores(game: ChatGame) -> str:
     for position, (uid, score) in enumerate(ordered, start=1):
         player = get_player(game, uid)
         name = player.name if player else f"Игрок {uid}"
+        icon = player_gender_icon(player) if player else ""
         medal = "🥇" if position == 1 else "🥈" if position == 2 else "🥉" if position == 3 else "🎯"
         prefix = "👑" if uid == game.host_id else medal
-        lines.append(f"{prefix} {mention_html(uid, name)} — <b>{score}</b>")
+        if player and player.is_virtual:
+            ref = f"{html.escape(name)}{(' ' + icon) if icon else ''}"
+        else:
+            ref = f"{mention_html(uid, name)}{(' ' + icon) if icon else ''}"
+        lines.append(f"{prefix} {ref} — <b>{score}</b>")
     return "\n".join(lines)
 
 
@@ -336,12 +386,20 @@ def describe_points(game: ChatGame) -> str:
     return "Включены" if game.settings.get("points", True) else "Отключены"
 
 
-def register_player(game: ChatGame, user_id: int, full_name: str) -> bool:
-    if get_player(game, user_id):
-        return False
-    game.players.append(Player(user_id, full_name))
+def register_player(
+    game: ChatGame,
+    user_id: int,
+    full_name: str,
+    *,
+    gender: str = DEFAULT_GENDER_KEY,
+    is_virtual: bool = False,
+) -> Optional[Player]:
+    if not is_virtual and get_player(game, user_id):
+        return None
+    player = Player(user_id, full_name, gender=gender, is_virtual=is_virtual)
+    game.players.append(player)
     game.scores.setdefault(user_id, 0)
-    return True
+    return player
 
 
 def drop_player(game: ChatGame, user_id: int) -> bool:
@@ -353,6 +411,11 @@ def drop_player(game: ChatGame, user_id: int) -> bool:
     return removed
 
 
+def allocate_virtual_id(game: ChatGame) -> int:
+    game.virtual_counter -= 1
+    return game.virtual_counter
+
+
 async def refresh_lobby(game: ChatGame, *, message: Optional[Message] = None):
     host_player = get_player(game, game.host_id)
     host_name = host_player.name if host_player else "Хост"
@@ -362,7 +425,7 @@ async def refresh_lobby(game: ChatGame, *, message: Optional[Message] = None):
         "🧩 <b>Лобби игры</b>\n"
         f"👑 Хост: {mention_html(game.host_id, host_name)}\n"
         f"👥 Игроки ({len(game.players)}):\n{players_block}\n\n"
-        "Жмите <b>Войти</b>, чтобы участвовать. Хост запускает игру кнопкой «Старт»."
+        "Добавляйте участников кнопкой «Добавить игрока». Хост запускает игру кнопкой «Старт»."
     )
     keyboard = lobby_keyboard(game)
     target_chat = game.chat_id
@@ -542,28 +605,11 @@ async def close_settings_menu(game: ChatGame):
     game.settings_message_id = None
 
 
-async def join_game(game: ChatGame, user_id: int, full_name: str) -> Tuple[bool, str]:
-    if not register_player(game, user_id, full_name):
-        return False, "Ты уже в игре 😉"
-    await refresh_lobby(game)
-    return True, f"{mention_html(user_id, full_name)} вошёл(ла) в игру!"
-
-
-async def leave_game(game: ChatGame, user_id: int) -> Tuple[bool, str]:
-    if is_host(game, user_id):
-        return False, "Хост управляет игрой и не может выйти. Используй /end."
-    if not drop_player(game, user_id):
-        return False, "Тебя нет в списке игроков."
-    await refresh_lobby(game)
-    if game.in_progress and game.current_turn and game.current_turn.player_id == user_id:
-        await handle_skip(game.chat_id, reason="🚪 Игрок покинул игру. Ход передан далее.")
-    return True, "Ты вышел из игры."
-
-
 async def end_game_session(game: ChatGame, reason: str):
     await cancel_timer(game)
     await close_settings_menu(game)
     game.in_progress = False
+    clear_pending_additions(game.chat_id)
 
     if game.vote and game.vote.message_id:
         try:
@@ -629,14 +675,38 @@ def pick_card(game: ChatGame, kind: str) -> Tuple[Optional[Dict], bool]:
 
 def lobby_keyboard(game: ChatGame) -> InlineKeyboardMarkup:
     buttons = [
-        [
-            InlineKeyboardButton(text="➕ Войти", callback_data="join"),
-            InlineKeyboardButton(text="➖ Выйти", callback_data="leave"),
-        ],
+        [InlineKeyboardButton(text="➕ Добавить игрока", callback_data="add_player")],
         [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
         [InlineKeyboardButton(text="▶️ Старт", callback_data="start")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_gender_keyboard(chat_id: int, host_id: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    first_row: List[InlineKeyboardButton] = []
+    for key in ("male", "female"):
+        info = GENDER_OPTIONS[key]
+        first_row.append(
+            InlineKeyboardButton(
+                text=f"{info['emoji']} {info['title']}",
+                callback_data=f"addgender:{chat_id}:{host_id}:{key}"
+            )
+        )
+    rows.append(first_row)
+    other_info = GENDER_OPTIONS["other"]
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{other_info['emoji']} {other_info['title']}",
+            callback_data=f"addgender:{chat_id}:{host_id}:other"
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="❌ Отмена", callback_data=f"addgender:{chat_id}:{host_id}:cancel"
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def turn_choice_keyboard(game: ChatGame, show_end: bool) -> InlineKeyboardMarkup:
     row1 = [
@@ -711,10 +781,10 @@ async def on_start(m: Message):
     await m.answer(
         "👋 Привет! Это игра <b>Правда или Действие</b>.\n\n"
         "Создай лобби командой /newgame — ты автоматически станешь хостом."
-        " Пригласи друзей кнопкой «Войти», а затем жми «Старт», когда все готовы.\n\n"
+        " Добавляй участников кнопкой «Добавить игрока», указывая имя и пол.\n"
+        "Когда все на месте — жми «Старт».\n\n"
         "<b>Команды</b>:\n"
         "• /newgame — создать лобби\n"
-        "• /join и /leave — войти или выйти\n"
         "• /score — посмотреть счёт\n"
         "• /settings — открыть настройки (только хост)\n"
         "• /end — завершить игру\n"
@@ -730,33 +800,13 @@ async def cmd_newgame(m: Message):
     if existing:
         await end_game_session(existing, "🔁 Лобби перезапущено новым хостом.")
 
+    clear_pending_additions(chat_id)
     game = ChatGame(chat_id=chat_id, host_id=user_id)
     register_player(game, user_id, m.from_user.full_name)
     GAMES[chat_id] = game
 
     placeholder = await m.answer("🆕 Создаём лобби...", reply_markup=lobby_keyboard(game))
     await refresh_lobby(game, message=placeholder)
-
-@dp.message(Command("join"))
-async def cmd_join(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    if not game:
-        await m.answer("Лобби ещё не создано. Используйте /newgame")
-        return
-    ok, text = await join_game(game, m.from_user.id, m.from_user.full_name)
-    await m.answer(f"{'✅ ' if ok else ''}{text}")
-
-@dp.message(Command("leave"))
-async def cmd_leave(m: Message):
-    chat_id = m.chat.id
-    game = ensure_game(chat_id)
-    if not game:
-        await m.answer("Игра не найдена.")
-        return
-    ok, text = await leave_game(game, m.from_user.id)
-    await m.answer(f"{'✅ ' if ok else ''}{text}")
-
 @dp.message(Command("score"))
 async def cmd_score(m: Message):
     chat_id = m.chat.id
@@ -792,8 +842,8 @@ async def cmd_end(m: Message):
 async def cmd_help(m: Message):
     await m.answer(
         "ℹ️ <b>Правила и команды</b>\n\n"
-        "Создай лобби командой /newgame. Хост автоматически попадает в список игроков и может пригласить остальных.\n"
-        "Игроки присоединяются через /join или кнопку «Войти», выходят через /leave.\n\n"
+        "Создай лобби командой /newgame. Хост автоматически попадает в список игроков и может добавлять остальных вручную.\n"
+        "Нажми «Добавить игрока», введи имя участника и выбери пол — бот добавит его в список.\n\n"
         "Когда готовы — хост жмёт «Старт». Каждый ход игрок выбирает <b>Правда</b> или <b>Действие</b>.\n"
         "Выполнил? Голосуйте 👍/👎 или пусть хост решит.\n\n"
         "Команды: /score — счёт, /settings — настройки (доступно хосту), /end — завершить игру, /import_deck — добавить свои вопросы."
@@ -828,35 +878,148 @@ async def cmd_import_deck(m: Message):
     except Exception as e:
         await m.answer(f"❌ Ошибка парсинга JSON: {e}")
 
+
+@dp.message(F.text)
+async def handle_pending_player_name(m: Message):
+    key = (m.chat.id, m.from_user.id)
+    pending = PENDING_PLAYER_ADDITIONS.get(key)
+    if not pending:
+        return
+
+    text = (m.text or "").strip()
+    if not text:
+        return
+
+    lowered = text.lower()
+    if lowered in {"отмена", "/cancel"}:
+        PENDING_PLAYER_ADDITIONS.pop(key, None)
+        await m.answer("🚫 Добавление игрока отменено.")
+        return
+
+    if pending.name:
+        await m.answer("Выбери пол с помощью кнопок под предыдущим сообщением или напиши «Отмена».")
+        return
+
+    if text.startswith("/") and len(text) > 1:
+        await m.answer("Похоже, это команда. Отправь просто имя игрока или напиши «Отмена».")
+        return
+
+    pending.name = text
+    await m.answer(
+        f"Теперь выбери пол для <b>{html.escape(text)}</b>:",
+        reply_markup=build_gender_keyboard(m.chat.id, m.from_user.id)
+    )
+
 # ===========================
 # CALLBACKS (Inline)
 # ===========================
-
-@dp.callback_query(F.data == "join")
-async def cb_join(c: CallbackQuery):
+@dp.callback_query(F.data == "add_player")
+async def cb_add_player(c: CallbackQuery):
     chat_id = c.message.chat.id
     game = ensure_game(chat_id)
     if not game:
-        await c.answer("Сначала /newgame", show_alert=True); return
-    ok, text = await join_game(game, c.from_user.id, c.from_user.full_name)
-    if ok:
-        await c.message.answer(f"✅ {text}")
-        await c.answer("Готово!")
-    else:
-        await c.answer(text, show_alert=True)
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+    if not is_host(game, c.from_user.id):
+        await c.answer("Добавлять игроков может только хост.", show_alert=True)
+        return
+    if game.in_progress:
+        await c.answer("Добавлять игроков можно только в лобби.", show_alert=True)
+        return
 
-@dp.callback_query(F.data == "leave")
-async def cb_leave(c: CallbackQuery):
-    chat_id = c.message.chat.id
+    key = (chat_id, c.from_user.id)
+    pending = PENDING_PLAYER_ADDITIONS.get(key)
+    if pending and not pending.name:
+        await c.message.answer("✍️ Я уже жду имя игрока. Отправь его одним сообщением или напиши «Отмена».")
+        await c.answer()
+        return
+    if pending and pending.name:
+        PENDING_PLAYER_ADDITIONS[key] = PendingPlayerAddition(chat_id=chat_id, host_id=c.from_user.id)
+        await c.message.answer("🔁 Предыдущий выбор пола сброшен. Отправь имя нового игрока.")
+        await c.answer()
+        return
+
+    PENDING_PLAYER_ADDITIONS[key] = PendingPlayerAddition(chat_id=chat_id, host_id=c.from_user.id)
+    await c.message.answer("✍️ Введи имя игрока в следующем сообщении. Напиши «Отмена», чтобы отменить.")
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("addgender:"))
+async def cb_add_gender(c: CallbackQuery):
+    parts = c.data.split(":", 3)
+    if len(parts) != 4:
+        await c.answer("Некорректные данные.", show_alert=True)
+        return
+    _, chat_raw, host_raw, choice = parts
+    try:
+        chat_id = int(chat_raw)
+        host_id = int(host_raw)
+    except ValueError:
+        await c.answer("Некорректные данные.", show_alert=True)
+        return
+
+    if chat_id != c.message.chat.id or host_id != c.from_user.id:
+        await c.answer("Эта кнопка не для тебя.", show_alert=True)
+        return
+
+    key = (chat_id, host_id)
+    pending = PENDING_PLAYER_ADDITIONS.get(key)
+    if not pending:
+        await c.answer("Нет ожидающего игрока.", show_alert=True)
+        return
+
+    if choice == "cancel":
+        PENDING_PLAYER_ADDITIONS.pop(key, None)
+        try:
+            await c.message.edit_reply_markup()
+        except Exception:
+            pass
+        await c.message.answer("🚫 Добавление игрока отменено.")
+        await c.answer("Отменено")
+        return
+
+    if not pending.name:
+        await c.answer("Сначала отправь имя игрока.", show_alert=True)
+        return
+
     game = ensure_game(chat_id)
     if not game:
-        await c.answer("Игра не найдена.", show_alert=True); return
-    ok, text = await leave_game(game, c.from_user.id)
-    if ok:
-        await c.message.answer(f"ℹ️ {text}")
-        await c.answer("Готово!")
-    else:
-        await c.answer(text, show_alert=True)
+        PENDING_PLAYER_ADDITIONS.pop(key, None)
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
+
+    if game.in_progress:
+        PENDING_PLAYER_ADDITIONS.pop(key, None)
+        await c.answer("Добавлять игроков можно только в лобби.", show_alert=True)
+        return
+
+    gender_key = choice if choice in GENDER_OPTIONS else DEFAULT_GENDER_KEY
+    new_id = allocate_virtual_id(game)
+    player = register_player(
+        game,
+        new_id,
+        pending.name,
+        gender=gender_key,
+        is_virtual=True,
+    )
+    PENDING_PLAYER_ADDITIONS.pop(key, None)
+
+    try:
+        await c.message.edit_reply_markup()
+    except Exception:
+        pass
+
+    if not player:
+        await c.answer("Не удалось добавить игрока.", show_alert=True)
+        return
+
+    await refresh_lobby(game)
+    info = GENDER_OPTIONS[gender_key]
+    await c.message.answer(
+        f"✅ Добавлен игрок <b>{html.escape(player.name)}</b> ({info['emoji']} {info['title']})."
+    )
+    await c.answer("Готово!")
+
 
 @dp.callback_query(F.data == "start")
 async def cb_start(c: CallbackQuery):
@@ -906,7 +1069,7 @@ async def next_turn(msg: Message, game: ChatGame):
     # сообщение с выбором
     keyboard = turn_choice_keyboard(game, show_end=True)
     sent = await msg.answer(
-        f"{mention_html(pl.user_id, pl.name)}, выбери <b>Правда</b> или <b>Действие</b>.",
+        f"{render_player_link(pl)}, выбери <b>Правда</b> или <b>Действие</b>.",
         reply_markup=keyboard
     )
     game.current_turn = Turn(player_id=pl.user_id, message_id=sent.message_id)
@@ -940,7 +1103,7 @@ async def cb_pick_type(c: CallbackQuery):
     # Показ задания
     try:
         await c.message.edit_text(
-            f"👉 <b>Ход:</b> {mention_html(turn.player_id, 'Игрок')}\n"
+            f"👉 <b>Ход:</b> {get_player_display(game, turn.player_id)}\n"
             f"{'🟦 Правда' if kind=='truth' else '🟥 Действие'}:\n"
             f"{card['text']}",
             reply_markup=task_keyboard(game, for_host=True)
