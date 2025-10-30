@@ -49,8 +49,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart, Text
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
@@ -361,23 +360,6 @@ async def cancel_timer(game: ChatGame):
         except asyncio.CancelledError:
             pass
         game.timer_task = None
-
-
-async def refresh_settings_markup(message: Message, game: ChatGame):
-    try:
-        await message.edit_reply_markup(reply_markup=settings_keyboard(game))
-    except TelegramBadRequest:
-        try:
-            await message.edit_text(
-                "⚙️ <b>Настройки</b> (только хост может менять):",
-                reply_markup=settings_keyboard(game)
-            )
-        except TelegramBadRequest:
-            await message.answer(
-                "⚙️ <b>Настройки</b> (только хост может менять):",
-                reply_markup=settings_keyboard(game)
-            )
-
 
 async def start_timer(game: ChatGame, seconds: int, on_expire):
     await cancel_timer(game)
@@ -759,49 +741,41 @@ async def cb_settings(c: CallbackQuery):
     await c.message.answer("⚙️ <b>Настройки</b> (только хост может менять):", reply_markup=settings_keyboard(game))
     await c.answer()
 
-@dp.callback_query(Text(startswith="timer:"))
+@dp.callback_query(F.data.startswith("timer:"))
 async def cb_timer(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
-        return
+    if not game: return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять настройки.", show_alert=True); return
     val = int(c.data.split(":")[1])
     game.settings["timer"] = val
-    await refresh_settings_markup(c.message, game)
+    await c.message.edit_reply_markup(settings_keyboard(game))
     await c.answer(f"Таймер: {val if val>0 else 'Off'}")
 
-@dp.callback_query(Text(text="points:toggle"))
+@dp.callback_query(F.data == "points:toggle")
 async def cb_points(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
-        return
+    if not game: return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     game.settings["points"] = not game.settings["points"]
-    await refresh_settings_markup(c.message, game)
+    await c.message.edit_reply_markup(settings_keyboard(game))
     await c.answer("Готово.")
 
-@dp.callback_query(Text(text="penalty:toggle"))
+@dp.callback_query(F.data == "penalty:toggle")
 async def cb_penalty(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
-        return
+    if not game: return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     game.settings["skip_penalty"] = -1 if game.settings["skip_penalty"] == 0 else 0
-    await refresh_settings_markup(c.message, game)
+    await c.message.edit_reply_markup(settings_keyboard(game))
     await c.answer("Готово.")
 
-@dp.callback_query(Text(startswith="age:"))
+@dp.callback_query(F.data.startswith("age:"))
 async def cb_age(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
-        return
+    if not game: return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     a = c.data.split(":")[1]
@@ -811,15 +785,13 @@ async def cb_age(c: CallbackQuery):
         game.settings["age"].add(a)
     if not game.settings["age"]:  # минимум один уровень
         game.settings["age"].add(a)
-    await refresh_settings_markup(c.message, game)
+    await c.message.edit_reply_markup(settings_keyboard(game))
     await c.answer("Готово.")
 
-@dp.callback_query(Text(startswith="cat:"))
+@dp.callback_query(F.data.startswith("cat:"))
 async def cb_cat(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
-        return
+    if not game: return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может менять.", show_alert=True); return
     cat = c.data.split(":")[1]
@@ -829,7 +801,7 @@ async def cb_cat(c: CallbackQuery):
         game.settings["categories"].add(cat)
     if not game.settings["categories"]:
         game.settings["categories"].add(cat)
-    await refresh_settings_markup(c.message, game)
+    await c.message.edit_reply_markup(settings_keyboard(game))
     await c.answer("Готово.")
 
 @dp.callback_query(F.data == "back")
