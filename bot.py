@@ -41,12 +41,13 @@ pip install -U aiogram
 
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
 import asyncio
 import json
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -168,11 +169,36 @@ DEFAULT_DECK = [
     {"id":"extreme-d-07","type":"dare","category":"Жесть","age":"16+","tags":["креатив"],"text":"Сочини рекламный слоган для предмета на столе."},
     {"id":"extreme-d-08","type":"dare","category":"Жесть","age":"16+","tags":["актив"],"text":"Сделай 15 медленных приседаний под счёт компании."},
     {"id":"extreme-d-09","type":"dare","category":"Жесть","age":"16+","tags":["соц"],"text":"Назови свою цель на неделю и как проверим результат."},
-    {"id":"extreme-d-10","type":"dare","category":"Жесть","age":"16+","tags":["креатив"],"text":"Придумай «жёсткое» название нашему следующему челленджу."}
+    {"id":"extreme-d-10","type":"dare","category":"Жесть","age":"16+","tags":["креатив"],"text":"Придумай «жёсткое» название нашему следующему челленджу."},
+
+    # 18+ дополнения
+    {"id":"romance18-t-01","type":"truth","category":"Романтика","age":"18+","tags":["соц"],"text":"Расскажи про романтический момент, который оставил в тебе «🔥 искру»?"},
+    {"id":"romance18-d-01","type":"dare","category":"Романтика","age":"18+","tags":["креатив"],"text":"Сочини смелый тост, от которого всем станет жарко."},
+    {"id":"extreme18-t-01","type":"truth","category":"Жесть","age":"18+","tags":["смех"],"text":"Какой самый дерзкий поступок ты сделал(-а) ради веселья?"},
+    {"id":"extreme18-d-01","type":"dare","category":"Жесть","age":"18+","tags":["актив"],"text":"Придумай и изобрази «🔥 танец победы» длительностью 15 секунд."}
 ]
 
-CATEGORIES = ["Лёгкое", "Друзья", "Романтика", "Жесть"]
-AGE_LEVELS = ["0+", "12+", "16+"]  # PG, без откровенного 18+
+AGE_LEVELS: Dict[str, Dict[str, object]] = {
+    "0+": {"emoji": "🌱", "title": "0+", "rank": 0},
+    "12+": {"emoji": "🌟", "title": "12+", "rank": 1},
+    "16+": {"emoji": "⚡", "title": "16+", "rank": 2},
+    "18+": {"emoji": "🔥", "title": "18+", "rank": 3},
+}
+
+CATEGORY_INFO: Dict[str, Dict[str, object]] = {
+    "mix": {"emoji": "🎲", "title": "Смешанные", "categories": [
+        "Лёгкое",
+        "Друзья",
+        "Романтика",
+        "Жесть",
+    ]},
+    "Лёгкое": {"emoji": "✨", "title": "Лёгкое"},
+    "Друзья": {"emoji": "🤝", "title": "Дружба"},
+    "Романтика": {"emoji": "💞", "title": "Романтика"},
+    "Жесть": {"emoji": "💥", "title": "Жесть"},
+}
+
+TIMER_OPTIONS: Sequence[int] = (0, 20, 30, 45, 60)
 
 # ===========================
 # ИГРОВЫЕ СТРУКТУРЫ
@@ -206,16 +232,19 @@ class ChatGame:
     scores: Dict[int, int] = field(default_factory=dict)
     used_ids: Set[str] = field(default_factory=set)
     settings: Dict = field(default_factory=lambda: {
-        "timer": 30,            # сек., 0 отключить
-        "points": True,         # начислять очки
-        "skip_penalty": 0,      # -1 если нужен штраф
-        "age": set(AGE_LEVELS), # доступные уровни
-        "categories": set(CATEGORIES) # активные категории
+        "timer": 30,
+        "points": True,
+        "skip_penalty": 0,
+        "age_level": "16+",
+        "category": "mix",
     })
     current_turn: Optional[Turn] = None
     timer_task: Optional[asyncio.Task] = None
     vote: Optional[VoteState] = None
     extra_deck: List[Dict] = field(default_factory=list)  # пользовательские элементы
+    lobby_message_id: Optional[int] = None
+    settings_message_id: Optional[int] = None
+    rounds_played: int = 0
 
     def current_player(self) -> Optional[Player]:
         if not self.players: return None
@@ -249,29 +278,359 @@ def mention_html(user_id: int, name: str) -> str:
 def is_host(game: ChatGame, user_id: int) -> bool:
     return game.host_id == user_id
 
+
+def get_player(game: ChatGame, user_id: int) -> Optional[Player]:
+    return next((p for p in game.players if p.user_id == user_id), None)
+
+
+def format_player_name(game: ChatGame, player: Player) -> str:
+    prefix = "👑" if player.user_id == game.host_id else "🎮"
+    return f"{prefix} {mention_html(player.user_id, player.name)}"
+
+
+def cleanup_scores(game: ChatGame):
+    player_ids = {p.user_id for p in game.players}
+    game.scores = {uid: score for uid, score in game.scores.items() if uid in player_ids}
+
+
+def format_scores(game: ChatGame) -> str:
+    cleanup_scores(game)
+    if not game.scores:
+        return "Пока никто не получил очки."
+    ordered: List[Tuple[int, int]] = sorted(
+        game.scores.items(), key=lambda kv: kv[1], reverse=True
+    )
+    lines = []
+    for position, (uid, score) in enumerate(ordered, start=1):
+        player = get_player(game, uid)
+        name = player.name if player else f"Игрок {uid}"
+        medal = "🥇" if position == 1 else "🥈" if position == 2 else "🥉" if position == 3 else "🎯"
+        prefix = "👑" if uid == game.host_id else medal
+        lines.append(f"{prefix} {mention_html(uid, name)} — <b>{score}</b>")
+    return "\n".join(lines)
+
+
+def describe_timer(seconds: int) -> str:
+    return "Без таймера" if seconds <= 0 else f"{seconds} с"
+
+
+def describe_age(level: str) -> str:
+    data = AGE_LEVELS.get(level, AGE_LEVELS["16+"])
+    return f"{data['emoji']} {data['title']}"
+
+
+def describe_category(category_key: str) -> str:
+    info = CATEGORY_INFO.get(category_key, CATEGORY_INFO["mix"])
+    title = info.get("title", category_key)
+    if category_key == "mix":
+        return f"{info['emoji']} {title}"
+    return f"{info['emoji']} {title}"
+
+
+def describe_penalty(game: ChatGame) -> str:
+    return "-1" if game.settings.get("skip_penalty", 0) == -1 else "0"
+
+
+def describe_points(game: ChatGame) -> str:
+    return "Включены" if game.settings.get("points", True) else "Отключены"
+
+
+def register_player(game: ChatGame, user_id: int, full_name: str) -> bool:
+    if get_player(game, user_id):
+        return False
+    game.players.append(Player(user_id, full_name))
+    game.scores.setdefault(user_id, 0)
+    return True
+
+
+def drop_player(game: ChatGame, user_id: int) -> bool:
+    before = len(game.players)
+    game.players = [p for p in game.players if p.user_id != user_id]
+    removed = len(game.players) != before
+    if removed:
+        game.scores.pop(user_id, None)
+    return removed
+
+
+async def refresh_lobby(game: ChatGame, *, message: Optional[Message] = None):
+    host_player = get_player(game, game.host_id)
+    host_name = host_player.name if host_player else "Хост"
+    players_lines = [format_player_name(game, p) for p in game.players]
+    players_block = "\n".join(players_lines) if players_lines else "—"
+    text = (
+        "🧩 <b>Лобби игры</b>\n"
+        f"👑 Хост: {mention_html(game.host_id, host_name)}\n"
+        f"👥 Игроки ({len(game.players)}):\n{players_block}\n\n"
+        "Жмите <b>Войти</b>, чтобы участвовать. Хост запускает игру кнопкой «Старт»."
+    )
+    keyboard = lobby_keyboard(game)
+    target_chat = game.chat_id
+
+    if message:
+        try:
+            await message.edit_text(text, reply_markup=keyboard)
+            game.lobby_message_id = message.message_id
+            return
+        except Exception:
+            pass
+
+    if game.lobby_message_id:
+        try:
+            await bot.edit_message_text(
+                text,
+                chat_id=target_chat,
+                message_id=game.lobby_message_id,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:
+            pass
+
+    sent = await bot.send_message(target_chat, text, reply_markup=keyboard)
+    game.lobby_message_id = sent.message_id
+
+
+def settings_summary(game: ChatGame) -> str:
+    return (
+        f"⏱️ Таймер: <b>{describe_timer(game.settings.get('timer', 0))}</b>\n"
+        f"🎚 Возраст: <b>{describe_age(game.settings.get('age_level', '16+'))}</b>\n"
+        f"🎭 Категория: <b>{describe_category(game.settings.get('category', 'mix'))}</b>\n"
+        f"⭐ Очки: <b>{describe_points(game)}</b>\n"
+        f"⚖️ Штраф за пропуск: <b>{describe_penalty(game)}</b>"
+    )
+
+
+def settings_text(game: ChatGame, menu: str) -> str:
+    header = "⚙️ <b>Настройки игры</b>"
+    summary = settings_summary(game)
+    host_player = get_player(game, game.host_id)
+    host_name = host_player.name if host_player else "Хост"
+    if menu == "root":
+        return (
+            f"{header}\n"
+            f"👑 Хост: {mention_html(game.host_id, host_name)}\n\n"
+            f"{summary}\n\n"
+            "Выбери раздел, чтобы изменить параметры.\n🔒 Менять значения может только хост."
+        )
+    if menu == "timer":
+        return f"{header}\n\nВыбери длительность хода:"
+    if menu == "age":
+        return f"{header}\n\nВыбери возрастной уровень колоды:"
+    if menu == "category":
+        return f"{header}\n\nВыбери активную категорию вопросов:"
+    if menu == "other":
+        return f"{header}\n\nДополнительные настройки:" \
+            f"\n\n{summary}"
+    return header
+
+
+def build_settings_keyboard(game: ChatGame, menu: str = "root") -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if menu == "root":
+        rows = [
+            [
+                InlineKeyboardButton(text="⏱️ Время", callback_data="st:menu:timer"),
+                InlineKeyboardButton(text="🎚 Возраст", callback_data="st:menu:age"),
+            ],
+            [
+                InlineKeyboardButton(text="🎭 Категория", callback_data="st:menu:category"),
+                InlineKeyboardButton(text="🧩 Другое", callback_data="st:menu:other"),
+            ],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="st:close")],
+        ]
+    elif menu == "timer":
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text=(
+                        ("● " if t == game.settings.get("timer", 0) else "○ ")
+                        + ("Без таймера" if t == 0 else f"{t} с")
+                    ),
+                    callback_data=f"st:set:timer:{t}",
+                )
+            ]
+            for t in TIMER_OPTIONS
+        ]
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="st:menu:root")])
+    elif menu == "age":
+        buttons = []
+        current = game.settings.get("age_level", "16+")
+        for key, data in sorted(AGE_LEVELS.items(), key=lambda item: item[1]["rank"]):
+            prefix = "●" if key == current else "○"
+            buttons.append(
+                InlineKeyboardButton(
+                    text=f"{prefix} {data['emoji']} {data['title']}",
+                    callback_data=f"st:set:age:{key}",
+                )
+            )
+        rows = [[btn] for btn in buttons]
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="st:menu:root")])
+    elif menu == "category":
+        current = game.settings.get("category", "mix")
+        rows = []
+        for key, info in CATEGORY_INFO.items():
+            prefix = "●" if key == current else "○"
+            title = info.get("title", key)
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"{prefix} {info['emoji']} {title}",
+                    callback_data=f"st:set:category:{key}",
+                )
+            ])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="st:menu:root")])
+    elif menu == "other":
+        points_text = (
+            "⭐ Очки: " + ("Вкл" if game.settings.get("points", True) else "Выкл")
+        )
+        penalty_text = (
+            "⚖️ Штраф: "
+            + ("-1" if game.settings.get("skip_penalty", 0) == -1 else "0")
+        )
+        rows = [
+            [InlineKeyboardButton(text=points_text, callback_data="st:toggle:points")],
+            [InlineKeyboardButton(text=penalty_text, callback_data="st:toggle:penalty")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="st:menu:root")],
+        ]
+    else:
+        rows = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="st:menu:root")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_settings_menu(
+    game: ChatGame, menu: str = "root", *, message: Optional[Message] = None
+):
+    text = settings_text(game, menu)
+    keyboard = build_settings_keyboard(game, menu)
+    target_chat = game.chat_id
+
+    if message:
+        try:
+            await message.edit_text(text, reply_markup=keyboard)
+            game.settings_message_id = message.message_id
+            return
+        except Exception:
+            pass
+
+    if game.settings_message_id:
+        try:
+            await bot.edit_message_text(
+                text,
+                chat_id=target_chat,
+                message_id=game.settings_message_id,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:
+            pass
+
+    sent = await bot.send_message(target_chat, text, reply_markup=keyboard)
+    game.settings_message_id = sent.message_id
+
+
+async def close_settings_menu(game: ChatGame):
+    if not game.settings_message_id:
+        return
+    try:
+        await bot.delete_message(game.chat_id, game.settings_message_id)
+    except Exception:
+        pass
+    game.settings_message_id = None
+
+
+async def join_game(game: ChatGame, user_id: int, full_name: str) -> Tuple[bool, str]:
+    if not register_player(game, user_id, full_name):
+        return False, "Ты уже в игре 😉"
+    await refresh_lobby(game)
+    return True, f"{mention_html(user_id, full_name)} вошёл(ла) в игру!"
+
+
+async def leave_game(game: ChatGame, user_id: int) -> Tuple[bool, str]:
+    if is_host(game, user_id):
+        return False, "Хост управляет игрой и не может выйти. Используй /end."
+    if not drop_player(game, user_id):
+        return False, "Тебя нет в списке игроков."
+    await refresh_lobby(game)
+    if game.in_progress and game.current_turn and game.current_turn.player_id == user_id:
+        await handle_skip(game.chat_id, reason="🚪 Игрок покинул игру. Ход передан далее.")
+    return True, "Ты вышел из игры."
+
+
+async def end_game_session(game: ChatGame, reason: str):
+    await cancel_timer(game)
+    await close_settings_menu(game)
+    game.in_progress = False
+
+    if game.vote and game.vote.message_id:
+        try:
+            await bot.edit_message_text(
+                "Голосование закрыто.",
+                chat_id=game.chat_id,
+                message_id=game.vote.message_id,
+            )
+        except Exception:
+            pass
+    game.vote = None
+
+    cleanup_scores(game)
+    summary = format_scores(game)
+    scoreboard_text = ""
+    if game.settings.get("points", True) and game.rounds_played > 0 and game.scores:
+        scoreboard_text = f"\n\n🏆 <b>Финальный счёт</b>:\n{summary}"
+    elif game.scores:
+        scoreboard_text = f"\n\n📊 Итоги:\n{summary}"
+
+    await bot.send_message(game.chat_id, f"{reason}{scoreboard_text}")
+    GAMES.pop(game.chat_id, None)
+
 def get_deck_for_game(game: ChatGame) -> List[Dict]:
     # фильтр по возрасту/категориям
-    allowed_age = game.settings["age"]
-    allowed_cat = game.settings["categories"]
-    deck = [c for c in (DEFAULT_DECK + game.extra_deck)
-            if c.get("age") in allowed_age and c.get("category") in allowed_cat]
+    selected_age = game.settings.get("age_level", "16+")
+    age_rank = AGE_LEVELS[selected_age]["rank"]
+    allowed_age = {
+        age for age, data in AGE_LEVELS.items() if data["rank"] <= age_rank
+    }
+
+    selected_category = game.settings.get("category", "mix")
+    if selected_category == "mix":
+        allowed_categories = {
+            c.get("category")
+            for c in (DEFAULT_DECK + game.extra_deck)
+            if c.get("category")
+        }
+    else:
+        allowed_categories = {selected_category}
+
+    deck = [
+        c
+        for c in (DEFAULT_DECK + game.extra_deck)
+        if c.get("age") in allowed_age and c.get("category") in allowed_categories
+    ]
     return deck
 
-def pick_card(game: ChatGame, kind: str) -> Dict:
-    deck = [c for c in get_deck_for_game(game)
-            if c.get("type") == kind and c.get("id") not in game.used_ids]
+def pick_card(game: ChatGame, kind: str) -> Tuple[Optional[Dict], bool]:
+    deck = [
+        c
+        for c in get_deck_for_game(game)
+        if c.get("type") == kind and c.get("id") not in game.used_ids
+    ]
+    restarted = False
     if not deck:
         # сбрасываем использованные
         game.used_ids.clear()
         deck = [c for c in get_deck_for_game(game) if c.get("type") == kind]
-    return random.choice(deck) if deck else {}
+        restarted = bool(deck)
+    if not deck:
+        return None, False
+    return random.choice(deck), restarted
 
 def lobby_keyboard(game: ChatGame) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(text="➕ Join", callback_data="join"),
-         InlineKeyboardButton(text="➖ Leave", callback_data="leave")],
+        [
+            InlineKeyboardButton(text="➕ Войти", callback_data="join"),
+            InlineKeyboardButton(text="➖ Выйти", callback_data="leave"),
+        ],
         [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="▶️ Старт", callback_data="start")]
+        [InlineKeyboardButton(text="▶️ Старт", callback_data="start")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -306,47 +665,6 @@ def vote_keyboard(for_host: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅ Хост: зачесть", callback_data="host:accept"),
             InlineKeyboardButton(text="❌ Хост: отклонить", callback_data="host:reject"),
         ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def settings_keyboard(game: ChatGame) -> InlineKeyboardMarkup:
-    # Кнопки таймера
-    timers = [0, 20, 30, 45]
-    t_buttons = [InlineKeyboardButton(
-        text=("⏱️ " + ("● " if game.settings["timer"]==t else "") + (str(t)+"s" if t>0 else "Off")),
-        callback_data=f"timer:{t}"
-    ) for t in timers]
-
-    # Очки и штраф
-    p_text = "Очки: Вкл" if game.settings["points"] else "Очки: Выкл"
-    pen_text = "Штраф за пропуск: -1" if game.settings["skip_penalty"] == -1 else "Штраф: 0"
-    p_buttons = [
-        InlineKeyboardButton(text=p_text, callback_data="points:toggle"),
-        InlineKeyboardButton(text=pen_text, callback_data="penalty:toggle")
-    ]
-
-    # Возраст
-    age_buttons = []
-    for a in AGE_LEVELS:
-        on = "●" if a in game.settings["age"] else "○"
-        age_buttons.append(InlineKeyboardButton(text=f"{on} {a}", callback_data=f"age:{a}"))
-
-    # Категории (две в ряд)
-    cat_rows = []
-    cats = list(CATEGORIES)
-    for i in range(0, len(cats), 2):
-        row = []
-        for c in cats[i:i+2]:
-            on = "●" if c in game.settings["categories"] else "○"
-            row.append(InlineKeyboardButton(text=f"{on} {c}", callback_data=f"cat:{c}"))
-        cat_rows.append(row)
-
-    rows: List[List[InlineKeyboardButton]] = [
-        t_buttons,
-        p_buttons,
-        age_buttons,
-        *cat_rows,
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def ensure_game(chat_id: int) -> Optional[ChatGame]:
@@ -387,16 +705,16 @@ def next_index(game: ChatGame) -> int:
 @dp.message(CommandStart())
 async def on_start(m: Message):
     await m.answer(
-        "👋 Привет! Это игра <b>Правда или Действие</b>.\n"
-        "Создай лобби командой /newgame, подключайся кнопкой <i>Join</i>, "
-        "затем хост запускает игру.\n\n"
+        "👋 Привет! Это игра <b>Правда или Действие</b>.\n\n"
+        "Создай лобби командой /newgame — ты автоматически станешь хостом."
+        " Пригласи друзей кнопкой «Войти», а затем жми «Старт», когда все готовы.\n\n"
         "<b>Команды</b>:\n"
-        "/newgame — создать новую игру\n"
-        "/join — присоединиться\n"
-        "/leave — выйти\n"
-        "/score — счёт\n"
-        "/settings — настройки\n"
-        "/end — завершить игру\n"
+        "• /newgame — создать лобби\n"
+        "• /join и /leave — войти или выйти\n"
+        "• /score — посмотреть счёт\n"
+        "• /settings — открыть настройки (только хост)\n"
+        "• /end — завершить игру\n"
+        "• /help — подсказки и правила\n"
     )
 
 @dp.message(Command("newgame"))
@@ -404,18 +722,16 @@ async def cmd_newgame(m: Message):
     chat_id = m.chat.id
     user_id = m.from_user.id
 
-    # Прерываем предыдущую игру в чате (если была)
-    if chat_id in GAMES:
-        await cancel_timer(GAMES[chat_id])
+    existing = GAMES.get(chat_id)
+    if existing:
+        await end_game_session(existing, "🔁 Лобби перезапущено новым хостом.")
 
     game = ChatGame(chat_id=chat_id, host_id=user_id)
+    register_player(game, user_id, m.from_user.full_name)
     GAMES[chat_id] = game
 
-    await m.answer(
-        f"🧩 Создано лобби. Хост: {mention_html(user_id, m.from_user.full_name)}\n"
-        f"Нажмите <b>Join</b>, затем хост может запустить игру.",
-        reply_markup=lobby_keyboard(game)
-    )
+    placeholder = await m.answer("🆕 Создаём лобби...", reply_markup=lobby_keyboard(game))
+    await refresh_lobby(game, message=placeholder)
 
 @dp.message(Command("join"))
 async def cmd_join(m: Message):
@@ -424,12 +740,8 @@ async def cmd_join(m: Message):
     if not game:
         await m.answer("Лобби ещё не создано. Используйте /newgame")
         return
-    if any(p.user_id == m.from_user.id for p in game.players):
-        await m.answer("Ты уже в игре 😉")
-        return
-    game.players.append(Player(m.from_user.id, m.from_user.full_name))
-    game.scores.setdefault(m.from_user.id, 0)
-    await m.answer(f"Присоединился(ась): {mention_html(m.from_user.id, m.from_user.full_name)}")
+    ok, text = await join_game(game, m.from_user.id, m.from_user.full_name)
+    await m.answer(f"{'✅ ' if ok else ''}{text}")
 
 @dp.message(Command("leave"))
 async def cmd_leave(m: Message):
@@ -438,8 +750,8 @@ async def cmd_leave(m: Message):
     if not game:
         await m.answer("Игра не найдена.")
         return
-    game.players = [p for p in game.players if p.user_id != m.from_user.id]
-    await m.answer("Готово, ты вышел(-ла) из лобби.")
+    ok, text = await leave_game(game, m.from_user.id)
+    await m.answer(f"{'✅ ' if ok else ''}{text}")
 
 @dp.message(Command("score"))
 async def cmd_score(m: Message):
@@ -448,11 +760,7 @@ async def cmd_score(m: Message):
     if not game or not game.scores:
         await m.answer("Пока нет очков.")
         return
-    lines = []
-    for uid, score in sorted(game.scores.items(), key=lambda kv: kv[1], reverse=True):
-        name = next((p.name for p in game.players if p.user_id == uid), f"User {uid}")
-        lines.append(f"{mention_html(uid, name)} — <b>{score}</b>")
-    await m.answer("📊 <b>Счёт</b>:\n" + "\n".join(lines))
+    await m.answer("📊 <b>Текущий счёт</b>:\n" + format_scores(game))
 
 @dp.message(Command("settings"))
 async def cmd_settings(m: Message):
@@ -461,7 +769,7 @@ async def cmd_settings(m: Message):
     if not game:
         await m.answer("Игра не найдена. Сначала /newgame")
         return
-    await m.answer("⚙️ <b>Настройки</b> (только хост может менять):", reply_markup=settings_keyboard(game))
+    await show_settings_menu(game)
 
 @dp.message(Command("end"))
 async def cmd_end(m: Message):
@@ -473,9 +781,19 @@ async def cmd_end(m: Message):
     if not is_host(game, m.from_user.id):
         await m.answer("Только хост может завершить игру.")
         return
-    await cancel_timer(game)
-    GAMES.pop(chat_id, None)
-    await m.answer("🏁 Игра завершена. Спасибо за игру!")
+    await end_game_session(game, "🏁 Игра завершена. Спасибо за игру!")
+
+
+@dp.message(Command("help"))
+async def cmd_help(m: Message):
+    await m.answer(
+        "ℹ️ <b>Правила и команды</b>\n\n"
+        "Создай лобби командой /newgame. Хост автоматически попадает в список игроков и может пригласить остальных.\n"
+        "Игроки присоединяются через /join или кнопку «Войти», выходят через /leave.\n\n"
+        "Когда готовы — хост жмёт «Старт». Каждый ход игрок выбирает <b>Правда</b> или <b>Действие</b>.\n"
+        "Выполнил? Голосуйте 👍/👎 или пусть хост решит.\n\n"
+        "Команды: /score — счёт, /settings — настройки (доступно хосту), /end — завершить игру, /import_deck — добавить свои вопросы."
+    )
 
 @dp.message(Command("import_deck"))
 async def cmd_import_deck(m: Message):
@@ -516,12 +834,12 @@ async def cb_join(c: CallbackQuery):
     game = ensure_game(chat_id)
     if not game:
         await c.answer("Сначала /newgame", show_alert=True); return
-    if any(p.user_id == c.from_user.id for p in game.players):
-        await c.answer("Ты уже в игре 😉", show_alert=True); return
-    game.players.append(Player(c.from_user.id, c.from_user.full_name))
-    game.scores.setdefault(c.from_user.id, 0)
-    await update_lobby_message(c.message, game)
-    await c.answer("Готово!")
+    ok, text = await join_game(game, c.from_user.id, c.from_user.full_name)
+    if ok:
+        await c.message.answer(f"✅ {text}")
+        await c.answer("Готово!")
+    else:
+        await c.answer(text, show_alert=True)
 
 @dp.callback_query(F.data == "leave")
 async def cb_leave(c: CallbackQuery):
@@ -529,18 +847,12 @@ async def cb_leave(c: CallbackQuery):
     game = ensure_game(chat_id)
     if not game:
         await c.answer("Игра не найдена.", show_alert=True); return
-    game.players = [p for p in game.players if p.user_id != c.from_user.id]
-    await update_lobby_message(c.message, game)
-    await c.answer("Пока!")
-
-async def update_lobby_message(msg: Message, game: ChatGame):
-    names = ", ".join(mention_html(p.user_id, p.name) for p in game.players) or "—"
-    await msg.edit_text(
-        f"🧩 Лобби. Хост: {mention_html(game.host_id, 'Host')}\n"
-        f"Игроки: {names}\n\n"
-        f"Хост может нажать <b>Старт</b>, когда все готовы.",
-        reply_markup=lobby_keyboard(game)
-    )
+    ok, text = await leave_game(game, c.from_user.id)
+    if ok:
+        await c.message.answer(f"ℹ️ {text}")
+        await c.answer("Готово!")
+    else:
+        await c.answer(text, show_alert=True)
 
 @dp.callback_query(F.data == "start")
 async def cb_start(c: CallbackQuery):
@@ -550,12 +862,17 @@ async def cb_start(c: CallbackQuery):
         await c.answer("Игра не найдена.", show_alert=True); return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может начать.", show_alert=True); return
-    if len(game.players) < 1:
-        await c.answer("Нужно минимум 1 игрок.", show_alert=True); return
+    if len(game.players) < 2:
+        await c.answer("Нужно минимум 2 игрока.", show_alert=True); return
 
     game.in_progress = True
     game.current_idx = -1
-    await c.message.edit_text("🎲 Игра началась!")
+    game.used_ids.clear()
+    game.rounds_played = 0
+    cleanup_scores(game)
+    await close_settings_menu(game)
+
+    await c.message.edit_text("🎲 Игра началась! Готовьтесь к первому вопросу.")
     await next_turn(c.message, game)
 
 async def next_turn(msg: Message, game: ChatGame):
@@ -576,15 +893,20 @@ async def next_turn(msg: Message, game: ChatGame):
             await tmp.edit_text(f"🎯 Выбираем... <b>{nm}</b>")
         except Exception:
             pass
-    await tmp.edit_text(f"👉 Ход игрока: <b>{pl.name}</b> ({len(game.players)} игроков)")
+    await tmp.edit_text(
+        f"👉 Ход игрока: <b>{pl.name}</b> ({len(game.players)} игроков)\n"
+        f"Категория: {describe_category(game.settings.get('category', 'mix'))} | "
+        f"Таймер: {describe_timer(game.settings.get('timer', 0))}"
+    )
 
     # сообщение с выбором
-    keyboard = turn_choice_keyboard(game, show_end=is_host(game, game.host_id))
+    keyboard = turn_choice_keyboard(game, show_end=True)
     sent = await msg.answer(
         f"{mention_html(pl.user_id, pl.name)}, выбери <b>Правда</b> или <b>Действие</b>.",
         reply_markup=keyboard
     )
     game.current_turn = Turn(player_id=pl.user_id, message_id=sent.message_id)
+    game.vote = None
 
 @dp.callback_query(F.data.in_({"truth","dare"}))
 async def cb_pick_type(c: CallbackQuery):
@@ -598,9 +920,14 @@ async def cb_pick_type(c: CallbackQuery):
         await c.answer("Сейчас ход другого игрока.", show_alert=True); return
 
     kind = "truth" if c.data == "truth" else "dare"
-    card = pick_card(game, kind)
+    card, restarted = pick_card(game, kind)
     if not card:
-        await c.answer("Карточек не осталось.", show_alert=True); return
+        await end_game_session(game, "📦 Карточки закончились. Игра завершена.")
+        await c.answer("Карточки закончились.", show_alert=True)
+        return
+
+    if restarted:
+        await bot.send_message(chat_id, "📦 Колода исчерпана — перемешиваем и продолжаем!")
 
     game.used_ids.add(card["id"])
     turn.type = kind
@@ -612,7 +939,7 @@ async def cb_pick_type(c: CallbackQuery):
             f"👉 <b>Ход:</b> {mention_html(turn.player_id, 'Игрок')}\n"
             f"{'🟦 Правда' if kind=='truth' else '🟥 Действие'}:\n"
             f"{card['text']}",
-            reply_markup=task_keyboard(game, for_host=is_host(game, c.from_user.id))
+            reply_markup=task_keyboard(game, for_host=True)
         )
     except Exception:
         pass
@@ -634,10 +961,23 @@ async def handle_skip(chat_id: int, reason: str):
     if not game: return
     await cancel_timer(game)
     # штраф при настройке
+    penalty_note = ""
     if game.settings["skip_penalty"] == -1 and game.settings["points"] and game.current_turn:
         uid = game.current_turn.player_id
         game.scores[uid] = game.scores.get(uid, 0) - 1
-    await bot.send_message(chat_id, f"{reason}")
+        penalty_note = " (−1 очко)"
+    if game.vote and game.vote.message_id:
+        try:
+            await bot.edit_message_text(
+                "Голосование прекращено.",
+                chat_id=chat_id,
+                message_id=game.vote.message_id,
+            )
+        except Exception:
+            pass
+        game.vote = None
+    game.rounds_played += 1
+    await bot.send_message(chat_id, f"{reason}{penalty_note}")
     await proceed_next(chat_id)
 
 @dp.callback_query(F.data == "done")
@@ -646,6 +986,9 @@ async def cb_done(c: CallbackQuery):
     game = ensure_game(chat_id)
     if not game or not game.current_turn:
         await c.answer("Нет активного задания.", show_alert=True); return
+    if game.vote:
+        await c.answer("Голосование уже идёт.", show_alert=True)
+        return
     # Любой игрок может инициировать голосование
     await cancel_timer(game)
     game.vote = VoteState(yes=set(), no=set())
@@ -699,6 +1042,7 @@ async def cb_vote(c: CallbackQuery):
 async def finalize_task(chat_id: int, success: bool, by: str):
     game = ensure_game(chat_id)
     if not game or not game.current_turn: return
+    await cancel_timer(game)
     turn = game.current_turn
 
     # Очки
@@ -707,14 +1051,36 @@ async def finalize_task(chat_id: int, success: bool, by: str):
         if success:
             game.scores[turn.player_id] += 1
 
-    await bot.send_message(chat_id, f"{by}. "
-                                    f"{'Очко начислено.' if success and game.settings['points'] else 'Очки без изменений.'}")
+    if not game.settings["points"]:
+        points_text = "Очки отключены."
+    else:
+        points_text = "Очко начислено!" if success else "Очки без изменений."
+
+    result_text = f"{by}. {points_text}"
+
+    edited = False
+    if game.vote and game.vote.message_id:
+        try:
+            await bot.edit_message_text(
+                result_text,
+                chat_id=chat_id,
+                message_id=game.vote.message_id,
+            )
+            edited = True
+        except Exception:
+            pass
+
+    if not edited:
+        await bot.send_message(chat_id, result_text)
     game.vote = None
+    game.rounds_played += 1
     await proceed_next(chat_id)
 
 async def proceed_next(chat_id: int):
     game = ensure_game(chat_id)
     if not game: return
+    if not game.in_progress:
+        return
     game.current_turn = None
     await next_turn(await bot.send_message(chat_id, "▶️ Следующий ход..."), game)
 
@@ -726,9 +1092,7 @@ async def cb_end(c: CallbackQuery):
         await c.answer("Игра не найдена.", show_alert=True); return
     if not is_host(game, c.from_user.id):
         await c.answer("Только хост может завершить.", show_alert=True); return
-    await cancel_timer(game)
-    GAMES.pop(chat_id, None)
-    await c.message.answer("🏁 Игра завершена. Спасибо за игру!")
+    await end_game_session(game, "🏁 Игра завершена. Спасибо за игру!")
     await c.answer()
 
 # ====== SETTINGS ======
@@ -738,79 +1102,67 @@ async def cb_settings(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
     if not game:
         await c.answer("Игра не найдена.", show_alert=True); return
-    await c.message.answer("⚙️ <b>Настройки</b> (только хост может менять):", reply_markup=settings_keyboard(game))
+    await show_settings_menu(game)
     await c.answer()
 
-@dp.callback_query(F.data.startswith("timer:"))
-async def cb_timer(c: CallbackQuery):
+@dp.callback_query(F.data.startswith("st:"))
+async def cb_settings_router(c: CallbackQuery):
     game = ensure_game(c.message.chat.id)
-    if not game: return
-    if not is_host(game, c.from_user.id):
-        await c.answer("Только хост может менять настройки.", show_alert=True); return
-    val = int(c.data.split(":")[1])
-    game.settings["timer"] = val
-    await c.message.edit_reply_markup(settings_keyboard(game))
-    await c.answer(f"Таймер: {val if val>0 else 'Off'}")
+    if not game:
+        await c.answer("Игра не найдена.", show_alert=True)
+        return
 
-@dp.callback_query(F.data == "points:toggle")
-async def cb_points(c: CallbackQuery):
-    game = ensure_game(c.message.chat.id)
-    if not game: return
-    if not is_host(game, c.from_user.id):
-        await c.answer("Только хост может менять.", show_alert=True); return
-    game.settings["points"] = not game.settings["points"]
-    await c.message.edit_reply_markup(settings_keyboard(game))
-    await c.answer("Готово.")
+    parts = c.data.split(":")
+    action = parts[1]
 
-@dp.callback_query(F.data == "penalty:toggle")
-async def cb_penalty(c: CallbackQuery):
-    game = ensure_game(c.message.chat.id)
-    if not game: return
-    if not is_host(game, c.from_user.id):
-        await c.answer("Только хост может менять.", show_alert=True); return
-    game.settings["skip_penalty"] = -1 if game.settings["skip_penalty"] == 0 else 0
-    await c.message.edit_reply_markup(settings_keyboard(game))
-    await c.answer("Готово.")
+    if action == "menu":
+        menu = parts[2] if len(parts) > 2 else "root"
+        await show_settings_menu(game, menu=menu, message=c.message)
+        await c.answer()
+        return
 
-@dp.callback_query(F.data.startswith("age:"))
-async def cb_age(c: CallbackQuery):
-    game = ensure_game(c.message.chat.id)
-    if not game: return
-    if not is_host(game, c.from_user.id):
-        await c.answer("Только хост может менять.", show_alert=True); return
-    a = c.data.split(":")[1]
-    if a in game.settings["age"]:
-        game.settings["age"].remove(a)
-    else:
-        game.settings["age"].add(a)
-    if not game.settings["age"]:  # минимум один уровень
-        game.settings["age"].add(a)
-    await c.message.edit_reply_markup(settings_keyboard(game))
-    await c.answer("Готово.")
+    if action == "close":
+        await close_settings_menu(game)
+        await c.answer("Меню закрыто")
+        return
 
-@dp.callback_query(F.data.startswith("cat:"))
-async def cb_cat(c: CallbackQuery):
-    game = ensure_game(c.message.chat.id)
-    if not game: return
     if not is_host(game, c.from_user.id):
-        await c.answer("Только хост может менять.", show_alert=True); return
-    cat = c.data.split(":")[1]
-    if cat in game.settings["categories"]:
-        game.settings["categories"].remove(cat)
-    else:
-        game.settings["categories"].add(cat)
-    if not game.settings["categories"]:
-        game.settings["categories"].add(cat)
-    await c.message.edit_reply_markup(settings_keyboard(game))
-    await c.answer("Готово.")
+        await c.answer("Только хост может менять настройки.", show_alert=True)
+        return
 
-@dp.callback_query(F.data == "back")
-async def cb_back(c: CallbackQuery):
-    # Просто закрываем меню настроек
-    try:
-        await c.message.delete()
-    except Exception:
-        pass
+    if action == "set" and len(parts) >= 4:
+        target, value = parts[2], parts[3]
+        if target == "timer":
+            val = int(value)
+            if val not in TIMER_OPTIONS:
+                await c.answer("Такой таймер недоступен", show_alert=True)
+                return
+            game.settings["timer"] = val
+            await c.answer("Таймер обновлён")
+            await show_settings_menu(game, menu="timer", message=c.message)
+            return
+        if target == "age" and value in AGE_LEVELS:
+            game.settings["age_level"] = value
+            await c.answer("Возрастной уровень изменён")
+            await show_settings_menu(game, menu="age", message=c.message)
+            return
+        if target == "category" and value in CATEGORY_INFO:
+            game.settings["category"] = value
+            await c.answer("Категория обновлена")
+            await show_settings_menu(game, menu="category", message=c.message)
+            return
+
+    if action == "toggle" and len(parts) >= 3:
+        toggle_target = parts[2]
+        if toggle_target == "points":
+            game.settings["points"] = not game.settings.get("points", True)
+            await c.answer("Настройка очков изменена")
+        elif toggle_target == "penalty":
+            game.settings["skip_penalty"] = -1 if game.settings.get("skip_penalty", 0) == 0 else 0
+            await c.answer("Штраф обновлён")
+        await show_settings_menu(game, menu="other", message=c.message)
+        return
+
     await c.answer()
 
 # ===========================
