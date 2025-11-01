@@ -622,6 +622,105 @@ DEFAULT_CATEGORY_KEY = "Лёгкое"
 DEFAULT_CATEGORY_SET: Set[str] = {DEFAULT_CATEGORY_KEY}
 SELECTED_MARK = "✅"
 UNSELECTED_MARK = "▫️"
+MAX_NAME_LENGTH = 32
+DEFAULT_PLAYER_NAME = "Игрок"
+
+MESSAGES = {
+    "GAME_NOT_FOUND": "Игра не найдена. Создайте лобби командой /newgame.",
+    "HOST_ONLY": "Только создатель игры может сделать это.",
+    "ADD_HOST_ONLY": "Добавлять игроков может только создатель игры.",
+    "ADD_LOBBY_ONLY": "Добавлять игроков можно только в лобби.",
+    "NAME_PROMPT": "✍️ Введите имя игрока следующим сообщением. Напишите «Отмена», чтобы отменить.",
+    "NAME_PENDING": "✍️ Я уже жду имя игрока. Отправьте его одним сообщением или напишите «Отмена».",
+    "NAME_COMMAND_ERROR": "Похоже, это команда. Отправьте только имя или напишите «Отмена».",
+    "NAME_CANCELLED": "🚫 Добавление игрока отменено.",
+    "NAME_ADDED": "✅ Игрок добавлен: <b>{name}</b>.",
+    "NAME_ADD_FAILED": "Не удалось добавить игрока. Попробуйте другое имя.",
+    "CANCEL_NOT_EXPECTED": "Сейчас ввод имени не ожидается.",
+    "CANCEL_HOST_ONLY": "Отменить ввод может только тот, кто его начал.",
+    "INPUT_CANCELLED": "Ввод имени отменён.",
+    "RENAME_PROMPT": "✏️ Введите новое имя для игрока <b>{name}</b>. Напишите «Отмена», чтобы отменить.",
+    "RENAME_CANCELLED": "🚫 Переименование отменено.",
+    "RENAME_COMMAND_ERROR": "Похоже, это команда. Отправьте новое имя или напишите «Отмена».",
+    "RENAME_DONE": "✏️ Имя сохранено: <b>{name}</b>.",
+    "PLAYER_NOT_FOUND": "Игрок не найден. Откройте меню управления и попробуйте снова.",
+    "MANAGE_HOST_ONLY": "Менять список игроков может только создатель игры.",
+    "MANAGE_LOBBY_ONLY": "Управлять игроками можно только в лобби.",
+    "MOVE_UPDATED": "Порядок обновлён.",
+    "MOVE_FAILED": "Не удалось изменить порядок.",
+    "ALREADY_FIRST": "Игрок уже первый.",
+    "ALREADY_LAST": "Игрок уже последний.",
+    "DELETE_DONE": "Игрок удалён.",
+    "DELETE_FAILED": "Не удалось удалить игрока.",
+    "DELETE_CONTINUE_NOTE": "Игрок удалён. Продолжаем игру.",
+    "NO_PLAYERS_END": "🏁 Игра остановлена: игроков не осталось.",
+    "CARD_REROLL_NO_OPTIONS": "Других карточек не осталось — остаёмся на этой.",
+    "CARD_REROLL_OK": "Новая карточка готова!",
+}
+
+
+def message(key: str, **kwargs) -> str:
+    return MESSAGES[key].format(**kwargs)
+
+
+def normalize_name(raw: Optional[str], *, max_length: int = MAX_NAME_LENGTH) -> str:
+    text = "" if raw is None else str(raw)
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        cleaned = DEFAULT_PLAYER_NAME
+    if max_length <= 0:
+        return cleaned
+    if len(cleaned) > max_length:
+        trimmed = cleaned[: max_length - 1].rstrip()
+        if not trimmed:
+            trimmed = DEFAULT_PLAYER_NAME[: max_length - 1].rstrip()
+        cleaned = f"{trimmed}…"
+    return cleaned
+
+
+def _candidate_with_suffix(base: str, suffix_index: int) -> str:
+    if suffix_index <= 1:
+        return base
+    suffix = f" ({suffix_index})"
+    limit = MAX_NAME_LENGTH - len(suffix)
+    core = base
+    if limit < 1:
+        return f"{DEFAULT_PLAYER_NAME}{suffix}"[:MAX_NAME_LENGTH]
+    if len(core) > limit:
+        slice_limit = max(1, limit - 1)
+        trimmed = core[:slice_limit].rstrip()
+        core = f"{trimmed}…" if trimmed else DEFAULT_PLAYER_NAME[:limit]
+    return f"{core}{suffix}"
+
+
+def ensure_unique_name(
+    game: "ChatGame", base_name: str, *, exclude_id: Optional[int] = None
+) -> str:
+    desired = base_name or DEFAULT_PLAYER_NAME
+    existing = {
+        p.name.casefold()
+        for p in getattr(game, "players", [])
+        if exclude_id is None or p.user_id != exclude_id
+    }
+    if desired.casefold() not in existing:
+        return desired
+    for suffix_index in range(2, 200):
+        candidate = _candidate_with_suffix(desired, suffix_index)
+        if candidate.casefold() not in existing:
+            return candidate
+    # крайний случай — добавим порядковый номер, сохранив длину
+    fallback = _candidate_with_suffix(desired, random.randint(200, 999))
+    return fallback[:MAX_NAME_LENGTH]
+
+
+def prepare_player_name(
+    game: "ChatGame",
+    raw_name: Optional[str],
+    *,
+    exclude_id: Optional[int] = None,
+) -> str:
+    normalized = normalize_name(raw_name)
+    return ensure_unique_name(game, normalized, exclude_id=exclude_id)
 
 # ===========================
 # ИГРОВЫЕ СТРУКТУРЫ
@@ -882,19 +981,47 @@ def register_player(
 ) -> Optional[Player]:
     if not is_virtual and get_player(game, user_id):
         return None
-    player = Player(user_id, full_name, is_virtual=is_virtual)
+    name = prepare_player_name(
+        game,
+        full_name,
+        exclude_id=user_id if not is_virtual else None,
+    )
+    player = Player(user_id, name, is_virtual=is_virtual)
     game.players.append(player)
     game.scores.setdefault(user_id, 0)
     return player
 
 
-def drop_player(game: ChatGame, user_id: int) -> bool:
-    before = len(game.players)
-    game.players = [p for p in game.players if p.user_id != user_id]
-    removed = len(game.players) != before
-    if removed:
-        game.scores.pop(user_id, None)
-    return removed
+def drop_player(game: ChatGame, user_id: int) -> Tuple[bool, bool]:
+    removed_index: Optional[int] = None
+    for idx, player in enumerate(game.players):
+        if player.user_id == user_id:
+            removed_index = idx
+            break
+
+    if removed_index is None:
+        return False, False
+
+    game.players.pop(removed_index)
+    game.scores.pop(user_id, None)
+
+    removed_current = False
+    if game.current_turn and game.current_turn.player_id == user_id:
+        removed_current = True
+        game.current_turn = None
+
+    if game.current_idx >= removed_index:
+        game.current_idx -= 1
+
+    if not game.players:
+        game.current_idx = -1
+    else:
+        if game.current_idx < -1:
+            game.current_idx = -1
+        if game.current_idx >= len(game.players):
+            game.current_idx = len(game.players) - 1
+
+    return True, removed_current
 
 
 def move_player_in_list(game: ChatGame, user_id: int, offset: int) -> bool:
@@ -941,7 +1068,7 @@ async def refresh_lobby(
     text = (
         "🧩 <b>Лобби игры</b>\n"
         f"👥 Игроки ({len(game.players)}):\n{players_block}\n\n"
-        "Добавляйте участников кнопкой «Добавить игрока». «Старт» начинает партию, «Выйти» вернёт в главное меню."
+        "Добавляйте игроков кнопкой «Добавить игрока». «Старт» начинает партию, «Выйти» вернёт в главное меню."
     )
     keyboard = lobby_keyboard(game)
     target_chat = game.chat_id
@@ -1115,7 +1242,7 @@ async def send_main_menu(chat_id: int):
         chat_id,
         "👋 Привет! Это игра <b>Правда или Действие</b>.\n\n"
         "Создай лобби командой /newgame — ты автоматически попадёшь в список игроков."
-        " Добавляй участников кнопкой «Добавить игрока», просто введи имя.\n"
+        " Добавляй игроков кнопкой «Добавить игрока», просто введи имя.\n"
         "Когда все готовы — нажимай «Старт».\n\n"
         "Выбирай нужную команду кнопками ниже 👇",
         reply_markup=start_menu_keyboard(has_game),
@@ -1617,7 +1744,7 @@ async def send_help_text(chat_id: int):
         chat_id,
         "ℹ️ <b>Правила и команды</b>\n\n"
         "Создай лобби командой /newgame. Создатель игры сразу попадает в список игроков и может добавлять остальных вручную.\n"
-        "Нажми «Добавить игрока» и отправь имя участника — бот сразу внесёт его в лобби.\n\n"
+        "Нажми «Добавить игрока» и отправь имя игрока — бот сразу внесёт его в лобби.\n\n"
         "Когда готовы — ведущий жмёт «Старт». Каждый ход игрок выбирает <b>Правда</b> или <b>Действие</b>.\n"
         "После выполнения ведущий отмечает результат кнопками «Выполнено» или «Пропуск».\n\n"
         "Таймер (0, 20, 30, 45 или 60 секунд), возраст и активные категории (можно несколько) можно менять через меню настроек на том же устройстве.\n"
@@ -1773,33 +1900,34 @@ async def handle_pending_player_name(m: Message):
     if rename_pending:
         if lowered in {"отмена", "/cancel"}:
             PENDING_PLAYER_RENAMES.pop(key, None)
-            await m.answer("🚫 Переименование отменено.")
+            await m.answer(message("RENAME_CANCELLED"))
             game = ensure_game(m.chat.id)
             if game and game.player_menu_message_id:
                 await show_player_menu(game, menu="rename")
             return
 
         if text.startswith("/") and len(text) > 1:
-            await m.answer("Похоже, это команда. Отправь новое имя или напиши «Отмена».")
+            await m.answer(message("RENAME_COMMAND_ERROR"))
             return
 
         game = ensure_game(m.chat.id)
         if not game:
             PENDING_PLAYER_RENAMES.pop(key, None)
-            await m.answer("Игра не найдена. Сначала создайте лобби командой /newgame.")
+            await m.answer(message("GAME_NOT_FOUND"))
             return
 
         player = get_player(game, rename_pending.player_id)
         if not player:
             PENDING_PLAYER_RENAMES.pop(key, None)
-            await m.answer("Игрок не найден. Открой меню управления и попробуй снова.")
+            await m.answer(message("PLAYER_NOT_FOUND"))
             if game.player_menu_message_id:
                 await show_player_menu(game, menu="rename")
             return
 
-        player.name = text
+        new_name = prepare_player_name(game, text, exclude_id=player.user_id)
+        player.name = new_name
         PENDING_PLAYER_RENAMES.pop(key, None)
-        await m.answer(f"✏️ Игрок теперь <b>{html.escape(player.name)}</b>.")
+        await m.answer(message("RENAME_DONE", name=html.escape(new_name)))
         await refresh_lobby(game)
         if game.player_menu_message_id:
             await show_player_menu(game, menu="rename")
@@ -1812,7 +1940,7 @@ async def handle_pending_player_name(m: Message):
     if lowered in {"отмена", "/cancel"}:
         prompt_id = getattr(pending, "message_id", None)
         PENDING_PLAYER_ADDITIONS.pop(key, None)
-        await m.answer("🚫 Добавление игрока отменено.")
+        await m.answer(message("NAME_CANCELLED"))
         await safe_delete_message(m.chat.id, prompt_id)
         game = ensure_game(m.chat.id)
         if game:
@@ -1820,21 +1948,21 @@ async def handle_pending_player_name(m: Message):
         return
 
     if text.startswith("/") and len(text) > 1:
-        await m.answer("Похоже, это команда. Отправь просто имя игрока или напиши «Отмена».")
+        await m.answer(message("NAME_COMMAND_ERROR"))
         return
 
     game = ensure_game(m.chat.id)
     if not game:
         prompt_id = getattr(pending, "message_id", None)
         PENDING_PLAYER_ADDITIONS.pop(key, None)
-        await m.answer("Игра не найдена. Сначала создайте лобби командой /newgame.")
+        await m.answer(message("GAME_NOT_FOUND"))
         await safe_delete_message(m.chat.id, prompt_id)
         return
 
     if game.in_progress:
         prompt_id = getattr(pending, "message_id", None)
         PENDING_PLAYER_ADDITIONS.pop(key, None)
-        await m.answer("Добавлять игроков можно только в лобби. Завершите раунд или /end.")
+        await m.answer(message("ADD_LOBBY_ONLY"))
         await safe_delete_message(m.chat.id, prompt_id)
         return
 
@@ -1844,13 +1972,13 @@ async def handle_pending_player_name(m: Message):
     PENDING_PLAYER_ADDITIONS.pop(key, None)
 
     if not player:
-        await m.answer("Не удалось добавить игрока. Попробуй другое имя.")
+        await m.answer(message("NAME_ADD_FAILED"))
         await safe_delete_message(game.chat_id, prompt_id)
         await refresh_lobby(game)
         return
 
     await safe_delete_message(game.chat_id, prompt_id)
-    await m.answer(f"✅ Добавлен игрок <b>{html.escape(player.name)}</b>.")
+    await m.answer(message("NAME_ADDED", name=html.escape(player.name)))
     await refresh_lobby(game, force_new=True)
 
 # ===========================
@@ -1861,19 +1989,19 @@ async def cb_add_player(c: CallbackQuery):
     chat_id = c.message.chat.id
     game = ensure_game(chat_id)
     if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
+        await c.answer(message("GAME_NOT_FOUND"), show_alert=True)
         return
     if not is_host(game, c.from_user.id):
-        await c.answer("Добавлять игроков может только создатель игры.", show_alert=True)
+        await c.answer(message("ADD_HOST_ONLY"), show_alert=True)
         return
     if game.in_progress:
-        await c.answer("Добавлять игроков можно только в лобби.", show_alert=True)
+        await c.answer(message("ADD_LOBBY_ONLY"), show_alert=True)
         return
 
     key = (chat_id, c.from_user.id)
     pending = PENDING_PLAYER_ADDITIONS.get(key)
     if pending:
-        await c.message.answer("✍️ Я уже жду имя игрока. Отправь его одним сообщением или напиши «Отмена».")
+        await c.message.answer(message("NAME_PENDING"))
         await c.answer()
         return
 
@@ -1884,7 +2012,7 @@ async def cb_add_player(c: CallbackQuery):
         inline_keyboard=[[InlineKeyboardButton(text="🚫 Отменить ввод", callback_data="cancel_add")]]
     )
     prompt = await c.message.answer(
-        "✍️ Введи имя игрока в следующем сообщении. Напиши «Отмена», чтобы отменить.",
+        message("NAME_PROMPT"),
         reply_markup=cancel_markup,
     )
     pending_entry.message_id = prompt.message_id
@@ -1898,17 +2026,17 @@ async def cb_cancel_add(c: CallbackQuery):
     game = ensure_game(chat_id)
 
     if not entry:
-        await c.answer("Сейчас ввод имени не ожидается.", show_alert=True)
+        await c.answer(message("CANCEL_NOT_EXPECTED"), show_alert=True)
         return
 
     key, pending = entry
     if pending.host_id != c.from_user.id:
-        await c.answer("Отменить ввод может только тот, кто его начал.", show_alert=True)
+        await c.answer(message("CANCEL_HOST_ONLY"), show_alert=True)
         return
 
     PENDING_PLAYER_ADDITIONS.pop(key, None)
     await safe_delete_message(chat_id, getattr(pending, "message_id", None))
-    await c.answer("Ввод имени отменён.")
+    await c.answer(message("INPUT_CANCELLED"))
     if game:
         await refresh_lobby(game)
 
@@ -1918,13 +2046,13 @@ async def cb_manage_players(c: CallbackQuery):
     chat_id = c.message.chat.id
     game = ensure_game(chat_id)
     if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
+        await c.answer(message("GAME_NOT_FOUND"), show_alert=True)
         return
     if not is_host(game, c.from_user.id):
-        await c.answer("Менять игроков может только создатель лобби.", show_alert=True)
+        await c.answer(message("MANAGE_HOST_ONLY"), show_alert=True)
         return
     if game.in_progress:
-        await c.answer("Управлять игроками можно только в лобби.", show_alert=True)
+        await c.answer(message("MANAGE_LOBBY_ONLY"), show_alert=True)
         return
     await c.answer()
     await show_player_menu(game, menu="root")
@@ -1935,13 +2063,13 @@ async def cb_player_menu(c: CallbackQuery):
     chat_id = c.message.chat.id
     game = ensure_game(chat_id)
     if not game:
-        await c.answer("Игра не найдена.", show_alert=True)
+        await c.answer(message("GAME_NOT_FOUND"), show_alert=True)
         return
     if not is_host(game, c.from_user.id):
-        await c.answer("Менять игроков может только создатель лобби.", show_alert=True)
+        await c.answer(message("MANAGE_HOST_ONLY"), show_alert=True)
         return
     if game.in_progress:
-        await c.answer("Управлять игроками можно только в лобби.", show_alert=True)
+        await c.answer(message("MANAGE_LOBBY_ONLY"), show_alert=True)
         return
 
     parts = c.data.split(":")
@@ -1965,7 +2093,7 @@ async def cb_player_menu(c: CallbackQuery):
             return
         player = get_player(game, player_id)
         if not player:
-            await c.answer("Игрок не найден.", show_alert=True)
+            await c.answer(message("PLAYER_NOT_FOUND"), show_alert=True)
             if game.player_menu_message_id:
                 await show_player_menu(game, menu="rename")
             return
@@ -1973,9 +2101,9 @@ async def cb_player_menu(c: CallbackQuery):
         PENDING_PLAYER_RENAMES[key] = PendingPlayerRename(
             chat_id=chat_id, host_id=c.from_user.id, player_id=player_id
         )
-        await c.answer("Жду новое имя.")
+        await c.answer()
         await c.message.answer(
-            f"✏️ Введи новое имя для игрока <b>{html.escape(player.name)}</b>. Напиши «Отмена», чтобы отменить."
+            message("RENAME_PROMPT", name=html.escape(player.name))
         )
         return
 
@@ -1990,17 +2118,17 @@ async def cb_player_menu(c: CallbackQuery):
         players = game.players
         target_index = next((i for i, p in enumerate(players) if p.user_id == player_id), None)
         if target_index is None:
-            await c.answer("Игрок не найден.", show_alert=True)
+            await c.answer(message("PLAYER_NOT_FOUND"), show_alert=True)
             return
 
         if direction == "up":
             if target_index == 0:
-                await c.answer("Игрок уже первый", show_alert=True)
+                await c.answer(message("ALREADY_FIRST"), show_alert=True)
                 return
             offset = -1
         elif direction == "down":
             if target_index == len(players) - 1:
-                await c.answer("Игрок уже последний", show_alert=True)
+                await c.answer(message("ALREADY_LAST"), show_alert=True)
                 return
             offset = 1
         else:
@@ -2011,9 +2139,9 @@ async def cb_player_menu(c: CallbackQuery):
             await refresh_lobby(game)
             if game.player_menu_message_id:
                 await show_player_menu(game, menu="reorder")
-            await c.answer("Порядок обновлён.")
+            await c.answer(message("MOVE_UPDATED"))
         else:
-            await c.answer("Не удалось изменить порядок.", show_alert=True)
+            await c.answer(message("MOVE_FAILED"), show_alert=True)
         return
 
     if action == "delete" and len(parts) > 2:
@@ -2022,7 +2150,7 @@ async def cb_player_menu(c: CallbackQuery):
         except ValueError:
             await c.answer("Некорректный игрок.", show_alert=True)
             return
-        removed = drop_player(game, player_id)
+        removed, removed_current = drop_player(game, player_id)
         if removed:
             rename_key = (chat_id, c.from_user.id)
             info = PENDING_PLAYER_RENAMES.get(rename_key)
@@ -2031,9 +2159,19 @@ async def cb_player_menu(c: CallbackQuery):
             await refresh_lobby(game, force_new=True)
             if game.player_menu_message_id:
                 await show_player_menu(game, menu="delete")
-            await c.answer("Игрок удалён.")
+            if removed_current:
+                await cancel_timer(game)
+                if game.in_progress and game.players:
+                    await proceed_next(game, note=message("DELETE_CONTINUE_NOTE"))
+                elif game.in_progress and not game.players:
+                    await end_game_session(
+                        game,
+                        message("NO_PLAYERS_END"),
+                        keep_game=False,
+                    )
+            await c.answer(message("DELETE_DONE"))
         else:
-            await c.answer("Не удалось удалить игрока.", show_alert=True)
+            await c.answer(message("DELETE_FAILED"), show_alert=True)
         return
 
     if action == "noop":
@@ -2088,12 +2226,12 @@ async def cb_exit(c: CallbackQuery):
 async def next_turn(game: ChatGame):
     await cancel_timer(game)
     if next_index(game) == -1:
-        await update_panel_message(game, "Нет игроков. Добавьте участника, чтобы продолжить.")
+        await update_panel_message(game, "Нет игроков. Добавьте игрока, чтобы продолжить.")
         return
 
     pl = game.current_player()
     if not pl:
-        await update_panel_message(game, "Нет активного игрока. Попробуйте добавить участников.")
+        await update_panel_message(game, "Нет активного игрока. Добавьте игроков и начните заново.")
         return
 
     names = [p.name for p in game.players]
@@ -2214,9 +2352,9 @@ async def cb_reroll(c: CallbackQuery):
 
     await start_timer(game, game.settings["timer"], on_expire)
     if previous_card_id and card["id"] == previous_card_id:
-        await c.answer("Других карточек не осталось — остаёмся на этой.")
+        await c.answer(message("CARD_REROLL_NO_OPTIONS"))
     else:
-        await c.answer("Новая карточка готова!")
+        await c.answer(message("CARD_REROLL_OK"))
 
 @dp.callback_query(F.data == "skip")
 async def cb_skip(c: CallbackQuery):
